@@ -13,7 +13,7 @@
     "setup-bibles": "node scripts/download-bibles.js",
     "setup-bibles:kjv": "node scripts/download-bibles.js kjv",
     "setup-bibles:force": "node scripts/download-bibles.js --force",
-    "electron:compile": "node -e \"const fs=require('fs');fs.mkdirSync('dist-electron',{recursive:true});fs.writeFileSync('dist-electron/package.json','{\\\"type\\\":\\\"commonjs\\\"}');\" && tsc --project tsconfig.electron.json",
+    "electron:compile": "node scripts/prepare-electron-cjs.cjs && tsc --project tsconfig.electron.json",
     "electron:dev": "node scripts/electron-dev.cjs",
     "electron:start": "npm run electron:compile && cross-env NODE_ENV=development electron .",
     "electron:build": "npm run build && npm run electron:compile",
