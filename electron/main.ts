@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, screen, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, screen, session, shell } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import fs from 'fs';
 import path from 'path';
 
@@ -311,6 +312,147 @@ function notifyDisplaysChanged() {
   }
 }
 
+// ── Auto-updater ───────────────────────────────────────────────────
+
+let updateDownloaded = false;     // true once a release is ready to install
+let checkingManually  = false;    // true while the user triggered the check
+
+function setupAutoUpdater() {
+  if (isDev) return;
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('update-available', (info) => {
+    console.log(`[Updater] Update available: ${info.version}`);
+    if (checkingManually) {
+      checkingManually = false;
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'Update Available',
+        message: `ScriptureFlow ${info.version} is available`,
+        detail: 'Downloading in the background. You will be notified when it is ready to install.',
+        buttons: ['OK'],
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[Updater] Already up to date.');
+    if (checkingManually) {
+      checkingManually = false;
+      dialog.showMessageBox({
+        type: 'info',
+        title: 'No Updates',
+        message: 'You are up to date!',
+        detail: `ScriptureFlow ${app.getVersion()} is the latest version.`,
+        buttons: ['OK'],
+      });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log(`[Updater] Update downloaded: ${info.version}`);
+    updateDownloaded = true;
+    // Update the menu so "Check for Updates" becomes "Restart to Install"
+    buildAppMenu();
+    dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Ready',
+      message: `ScriptureFlow ${info.version} has been downloaded`,
+      detail: 'Restart now to install the update.',
+      buttons: ['Restart Now', 'Later'],
+      defaultId: 0,
+    }).then(({ response }) => {
+      if (response === 0) autoUpdater.quitAndInstall(false, true);
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error(`[Updater] Error: ${err.message}`);
+    if (checkingManually) {
+      checkingManually = false;
+      dialog.showMessageBox({
+        type: 'error',
+        title: 'Update Check Failed',
+        message: 'Could not check for updates.',
+        detail: err.message,
+        buttons: ['OK'],
+      });
+    }
+  });
+
+  // Silent check 5 s after startup, then every 4 hours
+  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5_000);
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1_000);
+}
+
+// ── Application menu ───────────────────────────────────────────────
+
+function buildAppMenu() {
+  const helpSubmenu: Electron.MenuItemConstructorOptions[] = updateDownloaded
+    ? [
+        {
+          label: 'Restart to Install Update',
+          click: () => autoUpdater.quitAndInstall(false, true),
+        },
+      ]
+    : [
+        {
+          label: 'Check for Updates...',
+          click: async () => {
+            if (isDev) {
+              dialog.showMessageBox({
+                type: 'info',
+                title: 'Development Mode',
+                message: 'Update checking is disabled in development mode.',
+                buttons: ['OK'],
+              });
+              return;
+            }
+            checkingManually = true;
+            try {
+              await autoUpdater.checkForUpdates();
+            } catch (err: any) {
+              checkingManually = false;
+              dialog.showMessageBox({
+                type: 'error',
+                title: 'Update Check Failed',
+                message: 'Could not reach the update server.',
+                detail: err.message,
+                buttons: ['OK'],
+              });
+            }
+          },
+        },
+      ];
+
+  helpSubmenu.push(
+    { type: 'separator' },
+    {
+      label: 'About ScriptureFlow',
+      click: () => {
+        dialog.showMessageBox({
+          type: 'info',
+          title: 'About ScriptureFlow',
+          message: 'ScriptureFlow',
+          detail: `Version ${app.getVersion()}\n\nAI-powered worship display that listens to your preacher and puts scripture on screen automatically.`,
+          buttons: ['OK'],
+        });
+      },
+    },
+  );
+
+  const menu = Menu.buildFromTemplate([
+    { role: 'fileMenu'   as const },
+    { role: 'editMenu'   as const },
+    { role: 'viewMenu'   as const },
+    { role: 'windowMenu' as const },
+    { label: 'Help', submenu: helpSubmenu },
+  ]);
+  Menu.setApplicationMenu(menu);
+}
+
 // ── App lifecycle ──────────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -326,6 +468,8 @@ app.whenReady().then(() => {
   // Guarantees channels are ready before any preload/renderer can invoke them.
   registerRealtimeHandlers();
   registerDeepgramHandlers();
+  buildAppMenu();
+  setupAutoUpdater();
 
   createMainWindow();
   // Live window is opened on demand when the user clicks "Open Window" in Settings.
