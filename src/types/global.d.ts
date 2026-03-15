@@ -18,7 +18,7 @@ declare global {
       // NDI — offscreen renderer approach; no windowId needed
       ndiStart: (sourceName: string) => Promise<{ ok: boolean; error?: string }>;
       ndiStop: () => void;
-      ndiGetStatus: () => Promise<{ status: string }>;
+      ndiGetStatus: () => Promise<{ status: string; reason?: string }>;
       onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string }) => void) => void;
 
       /** Open a URL in the system default browser */

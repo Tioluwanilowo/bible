@@ -48,7 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ndiStop: () => ipcRenderer.send('ndi-stop'),
 
   /** Get current NDI status from main process. */
-  ndiGetStatus: (): Promise<{ status: string }> =>
+  ndiGetStatus: (): Promise<{ status: string; reason?: string }> =>
     ipcRenderer.invoke('ndi-get-status'),
 
   /** Subscribe to NDI status changes pushed from main. */

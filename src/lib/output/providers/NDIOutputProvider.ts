@@ -28,10 +28,11 @@ export class NDIOutputProvider implements OutputProvider {
 
     if (typeof window !== 'undefined' && window.electronAPI?.ndiGetStatus) {
       try {
-        const { status } = await window.electronAPI.ndiGetStatus();
+        const { status, reason } = await window.electronAPI.ndiGetStatus();
         if (status === 'unavailable') {
-          this.setStatus('unavailable', 'grandiose not installed — NDI SDK missing');
-          outputLogger.info('NDI unavailable (grandiose not installed)', this.id);
+          const msg = reason ?? 'grandiose not installed — NDI SDK missing';
+          this.setStatus('unavailable', msg);
+          outputLogger.info(`NDI unavailable: ${msg}`, this.id);
         } else {
           this.setStatus('ready');
           outputLogger.info('NDI Provider ready', this.id);
