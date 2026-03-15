@@ -229,6 +229,21 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
     console.error('[NDI] Renderer load failed:', err.message);
   });
 
+  // ── Diagnostic: verify sender is visible to NDI find ──────────────
+  // Runs 3 s after start so the sender has time to register on the network.
+  // Check DevTools console for "[NDI] Visible sources" to confirm discovery.
+  setTimeout(() => {
+    try {
+      const finder = grandiose.find({ showLocalSources: true });
+      finder.sources(3000).then((sources: any[]) => {
+        console.log(`[NDI] Visible sources (${sources.length}):`, sources.map((s: any) => s.name));
+        if (sources.length === 0) {
+          console.warn('[NDI] No sources found — check Windows Firewall and network profile (must be Private, not Public)');
+        }
+      }).catch(() => {});
+    } catch { /* grandiose.find may not exist in all versions */ }
+  }, 3000);
+
   return { ok: true };
 }
 

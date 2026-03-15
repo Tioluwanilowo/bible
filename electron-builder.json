@@ -36,7 +36,8 @@
     "createStartMenuShortcut": true,
     "shortcutName": "ScriptureFlow",
     "installerIcon": "public/favicon.ico",
-    "uninstallerIcon": "public/favicon.ico"
+    "uninstallerIcon": "public/favicon.ico",
+    "include": "build/installer.nsh"
   },
 
   "npmRebuild": false,
