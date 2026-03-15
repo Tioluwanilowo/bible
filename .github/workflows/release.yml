@@ -23,14 +23,34 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
+      # --ignore-scripts prevents grandiose from running node-gyp at install time.
+      # The NDI SDK is not present yet, so native compilation would fail here.
+      # grandiose is compiled properly in the NDI step below once the SDK is ready.
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Download Bible JSON files if they aren't already committed to the repo.
       # safe to fail — the step is skipped if all bibles are already present.
       - name: Download Bible data
         run: node scripts/download-bibles.js
         continue-on-error: true
+
+      # Download the NDI SDK and compile grandiose against the packaged Electron version.
+      # NDI is optional — if the SDK download or compile fails the build still succeeds
+      # and the app ships without NDI (shows "grandiose not installed" in Settings).
+      - name: Install NDI SDK and compile grandiose
+        shell: powershell
+        continue-on-error: true
+        run: |
+          Write-Host "Downloading NDI SDK..."
+          $sdkUrl = "https://downloads.ndi.tv/SDK/NDI_SDK/NDI_SDK_v6_Windows.exe"
+          $installer = "$env:TEMP\NDI_SDK.exe"
+          Invoke-WebRequest -Uri $sdkUrl -OutFile $installer -UseBasicParsing
+          Write-Host "Installing NDI SDK silently..."
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+          Write-Host "Compiling grandiose against Electron..."
+          npx @electron/rebuild -f -w grandiose
+          Write-Host "grandiose compiled successfully — NDI enabled in build."
 
       # 1. vite build  → dist/
       # 2. tsc (electron)  → dist-electron/
