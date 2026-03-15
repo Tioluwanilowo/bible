@@ -86,6 +86,7 @@ const NDI_WINDOW_ID = '__ndi__';   // key in liveWindows for the hidden NDI rend
 let ndiSender: any = null;
 let ndiGrandiose: any = null;      // cached after first successful load
 let ndiLoadError: string | null = null;  // last error from require('grandiose')
+let ndiRepaintTimer: ReturnType<typeof setInterval> | null = null;
 
 // Known NDI Runtime install locations on Windows.
 // The packaged app may not inherit the user's PATH, so we prepend these
@@ -222,6 +223,14 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
 
   offscreenWin.webContents.startPainting();
 
+  // Force a repaint every second so NDI keeps streaming even on static content.
+  // Without this, paint events stop firing after the initial render and OBS
+  // shows a frozen or dropped source.
+  ndiRepaintTimer = setInterval(() => {
+    const win = liveWindows.get(NDI_WINDOW_ID);
+    if (win && !win.isDestroyed()) win.webContents.invalidate();
+  }, 1000);
+
   offscreenWin.on('closed', () => {
     liveWindows.delete(NDI_WINDOW_ID);
   });
@@ -237,15 +246,14 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
   });
 
   // ── Diagnostic: verify sender is visible to NDI find ──────────────
-  // Runs 3 s after start so the sender has time to register on the network.
+  // Runs 5 s after start so the sender has time to register on the network.
   // Check DevTools console for "[NDI] Visible sources" to confirm discovery.
   setTimeout(() => {
     try {
-      const finder = grandiose.find({ showLocalSources: true });
-      finder.sources(3000).then((sources: any[]) => {
+      grandiose.find({ showLocalSources: true, wait: 5000 }).then((sources: any[]) => {
         console.log(`[NDI] Visible sources (${sources.length}):`, sources.map((s: any) => s.name));
-        if (sources.length === 0) {
-          console.warn('[NDI] No sources found — check Windows Firewall and network profile (must be Private, not Public)');
+        if (!sources.some((s: any) => s.name && s.name.toLowerCase().includes('scriptureflow'))) {
+          console.warn('[NDI] ScriptureFlow not in discovery list — check Windows Firewall and network profile (must be Private, not Public)');
         }
       }).catch(() => {});
     } catch { /* grandiose.find may not exist in all versions */ }
@@ -255,6 +263,11 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
 }
 
 function stopNDI(notify = true) {
+  if (ndiRepaintTimer) {
+    clearInterval(ndiRepaintTimer);
+    ndiRepaintTimer = null;
+  }
+
   if (ndiSender) {
     try { ndiSender.destroy?.(); } catch { /* ignore */ }
     ndiSender = null;

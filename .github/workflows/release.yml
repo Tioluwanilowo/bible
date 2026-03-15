@@ -50,6 +50,36 @@ jobs:
           [IO.File]::WriteAllText($gyp, $t)
           Write-Host "Patched binding.gyp"
 
+      # grandiose v0.0.4 calls NDIlib_send_create (NDI v3 backward-compat path),
+      # which uses v3 UDP discovery. NDI v5/v6 receivers (OBS NDI plugin, NDI Tools 6,
+      # vMix) use mDNS-based v6 discovery and cannot see v3 UDP sources.
+      # NDIlib_send_create2 in the v6 DLL registers via v6 mDNS discovery instead.
+      # We call it dynamically via GetProcAddress (no v6 SDK headers/lib needed),
+      # falling back to NDIlib_send_create on machines with only NDI v3/v4 runtime.
+      - name: Patch grandiose_send.cc for NDI v6 sender creation (NDIlib_send_create2)
+        shell: powershell
+        run: |
+          $src = "node_modules/grandiose/src/grandiose_send.cc"
+          $t = [IO.File]::ReadAllText($src)
+          $t = $t.Replace('#include <string.h>', "#ifdef _WIN32`r`n#include <windows.h>`r`n#endif`r`n#include <string.h>")
+          $old = '  NDIlib_send_instance_t pNDI_send = NDIlib_send_create(&sendDesc);'
+          $new = @('  NDIlib_send_instance_t pNDI_send = nullptr;',
+                   '  {',
+                   '    typedef NDIlib_send_instance_t (*sc2_fn)(const void*);',
+                   '    HMODULE hm = GetModuleHandleA("Processing.NDI.Lib.x64.dll");',
+                   '    sc2_fn fn2 = hm ? (sc2_fn)GetProcAddress(hm, "NDIlib_send_create2") : nullptr;',
+                   '    if (fn2) {',
+                   '      unsigned char ext[256];',
+                   '      memset(ext, 0, sizeof(ext));',
+                   '      memcpy(ext, &sendDesc, sizeof(sendDesc));',
+                   '      pNDI_send = fn2(ext);',
+                   '    }',
+                   '    if (!pNDI_send) { pNDI_send = NDIlib_send_create(&sendDesc); }',
+                   '  }') -join "`r`n"
+          $t = $t.Replace($old, $new)
+          [IO.File]::WriteAllText($src, $t)
+          Write-Host "Patched grandiose_send.cc for NDI v6 sender creation"
+
       # Compile grandiose against the packaged Electron version.
       # grandiose bundles the NDI SDK headers inside the npm package (lib/ndi/),
       # so no separate NDI SDK download is needed — just rebuild for Electron.
