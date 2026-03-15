@@ -15,10 +15,11 @@
 
   ; Copy the NDI v6 DLL next to grandiose.node so Windows loads it via the
   ; same-directory search path (highest priority) rather than relying on PATH.
-  ; This ensures NDIlib_send_create2 (v6 mDNS discovery) is available so OBS,
-  ; vMix, and NDI Tools 6 can discover the ScriptureFlow source.
-  ; Only runs if NDI 6 Tools is already installed on this machine.
+  ; Try common NDI 6 install locations (Tools and Runtime variants).
   nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
+  nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
+  nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Runtime\v6\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Runtime\v6\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
+  nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Runtime\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
 !macroend
 
 !macro customUnInstall

@@ -107,6 +107,30 @@ const NDI_RUNTIME_PATHS = [
   'C:\\Program Files\\NewTek\\NDI 4 Runtime\\v4.6',
 ];
 
+let ndiRuntimeDiagnosticsLogged = false;
+
+function getGrandioseReleaseDir(): string {
+  if (isDev) {
+    return path.join(process.cwd(), 'node_modules', 'grandiose', 'build', 'Release');
+  }
+  return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose', 'build', 'Release');
+}
+
+function logNDIDllDiagnostics(): void {
+  if (ndiRuntimeDiagnosticsLogged) return;
+  ndiRuntimeDiagnosticsLogged = true;
+
+  const bundledDll = path.join(getGrandioseReleaseDir(), 'Processing.NDI.Lib.x64.dll');
+  if (fs.existsSync(bundledDll)) {
+    console.warn(
+      `[NDI] Bundled Processing.NDI.Lib.x64.dll detected at ${bundledDll}. ` +
+      'This can force legacy NDI discovery and hide sources from NDI v5/v6 receivers.'
+    );
+  } else {
+    console.log('[NDI] Bundled Processing.NDI.Lib.x64.dll not present (expected).');
+  }
+}
+
 function injectNDIRuntimePaths(): void {
   const existing = process.env.PATH ?? '';
   const toAdd = NDI_RUNTIME_PATHS
@@ -124,6 +148,7 @@ function injectNDIRuntimePaths(): void {
 function loadGrandiose(): any {
   if (ndiGrandiose) return ndiGrandiose;
   // Ensure NDI Runtime DLLs are findable before the first require()
+  logNDIDllDiagnostics();
   injectNDIRuntimePaths();
   try {
     ndiGrandiose = require('grandiose');
@@ -309,7 +334,27 @@ function createMainWindow() {
   });
 
   if (isDev) {
-    mainWindow.loadURL(DEV_SERVER_URL);
+    const loadDevUrl = async () => {
+      console.log(`[Electron] Loading renderer from dev server: ${DEV_SERVER_URL}`);
+      try {
+        await mainWindow!.loadURL(DEV_SERVER_URL);
+      } catch (err: any) {
+        const msg = err?.message ?? String(err);
+        console.error(`[Electron] Failed to load dev server URL ${DEV_SERVER_URL}: ${msg}`);
+        const html = `
+          <html>
+            <body style="font-family:Segoe UI,Arial,sans-serif;background:#111;color:#f5f5f5;padding:24px;line-height:1.5">
+              <h2 style="margin:0 0 12px 0">Renderer failed to load</h2>
+              <p style="margin:0 0 8px 0">Could not reach Vite dev server at <code>${DEV_SERVER_URL}</code>.</p>
+              <p style="margin:0 0 8px 0">Start it with <code>npm run dev</code> or use <code>npm run electron:dev</code>.</p>
+              <p style="margin:0">Error: <code>${msg}</code></p>
+            </body>
+          </html>
+        `;
+        await mainWindow!.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`);
+      }
+    };
+    void loadDevUrl();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }

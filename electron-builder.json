@@ -18,6 +18,8 @@
     "**/node_modules/grandiose/**"
   ],
 
+  "afterPack": "scripts/after-pack-ndi.cjs",
+
   "win": {
     "icon": "public/favicon.ico",
     "target": [
