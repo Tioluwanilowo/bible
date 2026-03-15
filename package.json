@@ -1,7 +1,7 @@
 {
   "name": "scriptureflow",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.0.7",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -17,6 +17,7 @@
     "electron:dev": "start \"Vite\" cmd /k npm run dev && timeout /t 4 && npm run electron:compile && set NODE_ENV=development&& npx electron .",
     "electron:start": "npm run electron:compile && cross-env NODE_ENV=development npx electron .",
     "electron:build": "npm run build && npm run electron:compile",
+    "setup-ndi": "npx @electron/rebuild -f -w grandiose",
     "electron:pack": "npm run electron:build && electron-builder --publish never",
     "electron:publish": "npm run electron:build && electron-builder --publish always"
   },

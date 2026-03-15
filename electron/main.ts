@@ -85,15 +85,63 @@ const DEV_SERVER_URL = isDev ? getDevServerUrl() : '';
 const NDI_WINDOW_ID = '__ndi__';   // key in liveWindows for the hidden NDI renderer
 let ndiSender: any = null;
 let ndiGrandiose: any = null;      // cached after first successful load
+let ndiLoadError: string | null = null;  // last error from require('grandiose')
 
-function loadGrandiose() {
+// Known NDI Runtime install locations on Windows.
+// The packaged app may not inherit the user's PATH, so we prepend these
+// directories before attempting to load grandiose so Windows can resolve
+// Processing.NDI.Lib.x64.dll even if it isn't in the process PATH.
+const NDI_RUNTIME_PATHS = [
+  'C:\\Program Files\\NDI\\NDI 6 Runtime\\v6',
+  'C:\\Program Files\\NDI\\NDI 6 Runtime',
+  'C:\\Program Files\\NDI\\NDI 5 Runtime',
+  'C:\\Program Files\\NewTek\\NewTek NDI Tools',
+  'C:\\Program Files\\NewTek\\NDI 4 Runtime\\v4.6',
+];
+
+function injectNDIRuntimePaths(): void {
+  const existing = process.env.PATH ?? '';
+  const toAdd = NDI_RUNTIME_PATHS
+    .filter(p => {
+      try { return fs.existsSync(p); } catch { return false; }
+    })
+    .filter(p => !existing.includes(p));
+
+  if (toAdd.length > 0) {
+    process.env.PATH = toAdd.join(';') + ';' + existing;
+    console.log(`[NDI] Injected runtime paths: ${toAdd.join(', ')}`);
+  }
+}
+
+function loadGrandiose(): any {
   if (ndiGrandiose) return ndiGrandiose;
+  // Ensure NDI Runtime DLLs are findable before the first require()
+  injectNDIRuntimePaths();
   try {
     ndiGrandiose = require('grandiose');
+    ndiLoadError = null;
+    console.log('[NDI] grandiose loaded successfully');
     return ndiGrandiose;
-  } catch {
+  } catch (err: any) {
+    ndiLoadError = err.message ?? String(err);
+    console.error(`[NDI] grandiose failed to load: ${ndiLoadError}`);
     return null;
   }
+}
+
+/** Human-readable explanation of why NDI is unavailable. */
+function ndiUnavailableReason(): string {
+  const msg = ndiLoadError ?? '';
+  if (msg.includes('Processing.NDI') || msg.includes('.dll') || msg.includes('DLL')) {
+    return 'NDI Runtime not installed — download NDI Tools from ndi.video/tools';
+  }
+  if (msg.includes('NODE_MODULE_VERSION') || msg.includes('was compiled against a different')) {
+    return 'grandiose needs to be recompiled for this Electron version — run: npm run setup-ndi';
+  }
+  if (msg.includes('Cannot find module') || msg.includes('grandiose')) {
+    return 'grandiose not installed — run: npm run setup-ndi';
+  }
+  return msg ? `grandiose failed to load: ${msg}` : 'grandiose not installed — NDI SDK missing';
 }
 
 /**
@@ -107,10 +155,7 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
 
   const grandiose = loadGrandiose();
   if (!grandiose) {
-    return {
-      ok: false,
-      error: 'grandiose not installed — run: npm install grandiose && npx electron-rebuild -f -w grandiose',
-    };
+    return { ok: false, error: ndiUnavailableReason() };
   }
 
   // ── Create NDI sender first (fast — just registers the source name) ──
@@ -204,10 +249,10 @@ function stopNDI(notify = true) {
   }
 }
 
-function getNDIStatus(): string {
-  if (!loadGrandiose()) return 'unavailable';
-  if (ndiSender) return 'active';
-  return 'stopped';
+function getNDIStatus(): { status: string; reason?: string } {
+  if (!loadGrandiose()) return { status: 'unavailable', reason: ndiUnavailableReason() };
+  if (ndiSender) return { status: 'active' };
+  return { status: 'stopped' };
 }
 
 // ── Window helpers ─────────────────────────────────────────────────
@@ -669,7 +714,7 @@ function registerRealtimeHandlers(): void {
 }
 
 ipcMain.handle('ndi-get-status', () => {
-  return { status: getNDIStatus() };
+  return getNDIStatus();   // already returns { status, reason? }
 });
 
 // ── IPC: Deepgram WebSocket bridge ─────────────────────────────────────────────

@@ -53,7 +53,7 @@ jobs:
           Start-Process -FilePath $installer -ArgumentList "/S" -Wait
           Write-Host "Compiling grandiose against Electron..."
           npx @electron/rebuild -f -w grandiose
-          Write-Host "grandiose compiled successfully — NDI enabled in build."
+          Write-Host "grandiose compiled successfully - NDI enabled in build."
 
       # 1. vite build  → dist/
       # 2. tsc (electron)  → dist-electron/
