@@ -1,0 +1,24 @@
+{
+  "version": "NIV",
+  "books": {
+    "Genesis": {
+      "1": {
+        "1": "In the beginning God created the heavens and the earth.",
+        "2": "Now the earth was formless and empty, darkness was over the surface of the deep, and the Spirit of God was hovering over the waters.",
+        "3": "And God said, \"Let there be light,\" and there was light."
+      }
+    },
+    "John": {
+      "3": {
+        "15": "that everyone who believes may have eternal life in him.",
+        "16": "For God so loved the world that he gave his one and only Son, that whoever believes in him shall not perish but have eternal life.",
+        "17": "For God did not send his Son into the world to condemn the world, but to save the world through him."
+      }
+    },
+    "Romans": {
+      "8": {
+        "28": "And we know that in all things God works for the good of those who love him, who have been called according to his purpose."
+      }
+    }
+  }
+}

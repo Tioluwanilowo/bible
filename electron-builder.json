@@ -1,0 +1,42 @@
+{
+  "appId": "com.scriptureflow.app",
+  "productName": "ScriptureFlow",
+  "copyright": "Copyright © 2026",
+
+  "directories": {
+    "output": "release",
+    "buildResources": "public"
+  },
+
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+
+  "win": {
+    "icon": "public/favicon.ico",
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ]
+  },
+
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "ScriptureFlow",
+    "installerIcon": "public/favicon.ico",
+    "uninstallerIcon": "public/favicon.ico"
+  },
+
+  "publish": {
+    "provider": "github",
+    "releaseType": "release"
+  }
+}

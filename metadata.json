@@ -1,0 +1,7 @@
+{
+  "name": "ScriptureFlow",
+  "description": "A church desktop app that detects spoken Bible references and scripture navigation commands.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

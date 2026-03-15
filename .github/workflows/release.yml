@@ -1,0 +1,46 @@
+name: Build & Release
+
+# Triggers whenever you push a version tag like: git tag v1.0.1 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write   # required to create GitHub Releases and upload assets
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Download Bible JSON files if they aren't already committed to the repo.
+      # safe to fail — the step is skipped if all bibles are already present.
+      - name: Download Bible data
+        run: node scripts/download-bibles.js
+        continue-on-error: true
+
+      # 1. vite build  → dist/
+      # 2. tsc (electron)  → dist-electron/
+      - name: Build renderer + main process
+        run: npm run electron:build
+
+      # electron-builder reads GH_TOKEN to create the release and upload the
+      # installer.  GITHUB_TOKEN is automatically provided by Actions — no
+      # manual secret setup needed.
+      - name: Package and publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --publish always

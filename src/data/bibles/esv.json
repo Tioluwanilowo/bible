@@ -1,0 +1,24 @@
+{
+  "version": "ESV",
+  "books": {
+    "Genesis": {
+      "1": {
+        "1": "In the beginning, God created the heavens and the earth.",
+        "2": "The earth was without form and void, and darkness was over the face of the deep. And the Spirit of God was hovering over the face of the waters.",
+        "3": "And God said, \"Let there be light,\" and there was light."
+      }
+    },
+    "John": {
+      "3": {
+        "15": "that whoever believes in him may have eternal life.",
+        "16": "For God so loved the world, that he gave his only Son, that whoever believes in him should not perish but have eternal life.",
+        "17": "For God did not send his Son into the world to condemn the world, but in order that the world might be saved through him."
+      }
+    },
+    "Romans": {
+      "8": {
+        "28": "And we know that for those who love God all things work together for good, for those who are called according to his purpose."
+      }
+    }
+  }
+}
