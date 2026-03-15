@@ -10,6 +10,9 @@ jobs:
   release:
     runs-on: windows-latest
 
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # silence Node.js 20 deprecation warning
+
     permissions:
       contents: write   # required to create GitHub Releases and upload assets
 
