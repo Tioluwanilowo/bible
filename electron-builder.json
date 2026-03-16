@@ -46,6 +46,8 @@
 
   "publish": {
     "provider": "github",
+    "owner": "Tioluwanilowo",
+    "repo": "bible",
     "releaseType": "release"
   }
 }
