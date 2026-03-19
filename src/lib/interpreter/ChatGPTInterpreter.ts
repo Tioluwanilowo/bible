@@ -26,6 +26,11 @@ const FALLBACK_MODEL = 'gpt-4o';
 const LOW_CONFIDENCE_THRESHOLD = 0.65;
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
+const DEBUG_CHATGPT = false;
+
+function debugLog(...args: unknown[]): void {
+  if (DEBUG_CHATGPT) console.log(...args);
+}
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `\
@@ -184,7 +189,7 @@ function extractJson(content: string): AIResponse {
     throw new Error('Missing "command" field in model response');
   }
   if (typeof parsed.confidence !== 'number') parsed.confidence = 0.8; // safe default
-  console.log(`[ChatGPT] ✔ Parsed AIResponse:`, parsed);
+  debugLog(`[ChatGPT] ✔ Parsed AIResponse:`, parsed);
   return parsed;
 }
 
@@ -195,7 +200,7 @@ async function callModel(
   apiKey:   string,
 ): Promise<AIResponse> {
   // ── DIAGNOSTIC: confirm exactly which endpoint + model we are hitting ────
-  console.log(`[ChatGPT] ▶ callModel  endpoint=${OPENAI_ENDPOINT}  model=${model}`);
+  debugLog(`[ChatGPT] ▶ callModel  endpoint=${OPENAI_ENDPOINT}  model=${model}`);
 
   const res = await fetch(OPENAI_ENDPOINT, {
     method:  'POST',
@@ -212,7 +217,7 @@ async function callModel(
     }),
   });
 
-  console.log(`[ChatGPT] ← HTTP ${res.status} ${res.statusText}  model=${model}`);
+  debugLog(`[ChatGPT] ← HTTP ${res.status} ${res.statusText}  model=${model}`);
 
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({})) as any;
@@ -224,9 +229,9 @@ async function callModel(
 
   // ── DIAGNOSTIC: log the full raw payload so we can see the exact structure ─
   try {
-    console.log(`[ChatGPT] Raw response (${model}):`, JSON.stringify(data, null, 2));
+    debugLog(`[ChatGPT] Raw response (${model}):`, JSON.stringify(data, null, 2));
   } catch {
-    console.log(`[ChatGPT] Raw response (${model}): [could not serialise]`);
+    debugLog(`[ChatGPT] Raw response (${model}): [could not serialise]`);
   }
 
   // ── DIAGNOSTIC: probe every known content field individually ─────────────
@@ -234,10 +239,10 @@ async function callModel(
   const pathOutputArray  = data?.output?.[0]?.content?.[0]?.text; // Responses API structured
   const pathChoices      = data?.choices?.[0]?.message?.content;   // Chat Completions
 
-  console.log(`[ChatGPT] Field probe (${model}):`);
-  console.log(`  output_text              → ${pathOutputText   !== undefined && pathOutputText   !== null ? `string(${String(pathOutputText).length})   "${String(pathOutputText).slice(0, 60)}"` : String(pathOutputText)}`);
-  console.log(`  output[0].content[0].text → ${pathOutputArray !== undefined && pathOutputArray !== null ? `string(${String(pathOutputArray).length})  "${String(pathOutputArray).slice(0, 60)}"` : String(pathOutputArray)}`);
-  console.log(`  choices[0].message.content → ${pathChoices    !== undefined && pathChoices    !== null ? `string(${String(pathChoices).length})  "${String(pathChoices).slice(0, 60)}"` : String(pathChoices)}`);
+  debugLog(`[ChatGPT] Field probe (${model}):`);
+  debugLog(`  output_text              → ${pathOutputText   !== undefined && pathOutputText   !== null ? `string(${String(pathOutputText).length})   "${String(pathOutputText).slice(0, 60)}"` : String(pathOutputText)}`);
+  debugLog(`  output[0].content[0].text → ${pathOutputArray !== undefined && pathOutputArray !== null ? `string(${String(pathOutputArray).length})  "${String(pathOutputArray).slice(0, 60)}"` : String(pathOutputArray)}`);
+  debugLog(`  choices[0].message.content → ${pathChoices    !== undefined && pathChoices    !== null ? `string(${String(pathChoices).length})  "${String(pathChoices).slice(0, 60)}"` : String(pathChoices)}`);
 
   // Try all locations; first non-null/non-undefined wins
   const content: string =
@@ -246,7 +251,7 @@ async function callModel(
     pathChoices     ??
     '';
 
-  console.log(`[ChatGPT] Extracted content (${model}): length=${content.length}  "${content.slice(0, 120)}"`);
+  debugLog(`[ChatGPT] Extracted content (${model}): length=${content.length}  "${content.slice(0, 120)}"`);
 
   if (!content) {
     // Dump top-level keys + any nested output/choices to make the structure obvious
@@ -299,7 +304,10 @@ export class ChatGPTInterpreter {
     // ── Step 2: Fallback if primary failed or returned low confidence ─────
     const needsFallback =
       !primaryResponse ||
-      primaryResponse.confidence < LOW_CONFIDENCE_THRESHOLD;
+      (
+        primaryResponse.command !== 'no_action' &&
+        primaryResponse.confidence < LOW_CONFIDENCE_THRESHOLD
+      );
 
     if (needsFallback) {
       try {

@@ -10,6 +10,7 @@ export default function LiveOutputManager() {
     settings,
     liveScripture,
     outputTargets,
+    providerStatuses,
     themes,
     activeThemeId,
   } = useStore();
@@ -86,10 +87,48 @@ export default function LiveOutputManager() {
         ...(elements ? { elements } : {}),
       };
 
-      // NDI targets are registered in the main process as '__ndi__', not by their
-      // target UUID — route them correctly so theme changes actually reach the NDI window.
-      const routeId = target.type === 'ndi' ? '__ndi__' : target.id;
+      // NDI targets route to per-target offscreen ids: "__ndi__:<targetId>".
+      const routeId = target.type === 'ndi' ? `__ndi__:${target.id}` : target.id;
       window.electronAPI?.sendToLive(routeId, payload);
+    }
+
+    // Backward compatibility for legacy global NDI provider route.
+    const hasEnabledNDITarget = enabledTargets.some(t => t.type === 'ndi');
+    if (!hasEnabledNDITarget && providerStatuses?.ndi?.status === 'active') {
+      const fallbackTarget = enabledTargets.find(t => t.id === 'main') ?? enabledTargets[0];
+      if (fallbackTarget) {
+        const resolvedTheme = themes.find(t => t.id === (fallbackTarget.themeId ?? activeThemeId));
+        const ps = resolvedTheme?.settings ?? settings.presentation;
+        const elements = resolvedTheme?.elements;
+        const legacyPayload = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          type: 'scripture' as const,
+          content,
+          presentation: {
+            theme: ps?.theme as any || 'dark',
+            layout: (elements ? 'custom' : ps?.layout) as any || 'full-scripture',
+            broadcastSafe: ps?.broadcastSafe ?? false,
+            backgroundStyle: ps?.backgroundStyle ?? 'solid',
+            fontFamily: ps?.fontFamily ?? 'serif',
+            fontScale: ps?.fontScale ?? 1,
+            textAlignment: ps?.textAlignment ?? 'center',
+            padding: ps?.padding ?? 48,
+            backgroundColor: ps?.backgroundColor ?? '',
+            backgroundOpacity: ps?.backgroundOpacity ?? 100,
+            textColor: ps?.textColor ?? '',
+            referenceColor: ps?.referenceColor ?? '',
+            textShadow: ps?.textShadow ?? false,
+            verseQuotes: ps?.verseQuotes ?? false,
+          },
+          visibility: {
+            reference: ps?.referenceVisible ?? true,
+            version: ps?.versionVisible ?? true,
+          },
+          ...(elements ? { elements } : {}),
+        };
+        window.electronAPI?.sendToLive('__ndi__', legacyPayload);
+      }
     }
 
     // Also push to non-Electron providers (NDI, etc.) using the primary target's theme
@@ -117,6 +156,7 @@ export default function LiveOutputManager() {
   }, [
     liveScripture,
     outputTargets,
+    providerStatuses,
     themes,
     activeThemeId,
     settings?.presentation,

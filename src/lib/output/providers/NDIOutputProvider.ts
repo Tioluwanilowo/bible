@@ -2,6 +2,8 @@ import { OutputProvider, OutputPayload, ProviderStatus } from '../../../types/ou
 import { outputLogger } from '../OutputDiagnosticsLogger';
 import { useStore } from '../../../store/useStore';
 
+const LEGACY_NDI_TARGET_ID = '__legacy__';
+
 export class NDIOutputProvider implements OutputProvider {
   public id = 'ndi';
   public name = 'NDI Output';
@@ -28,7 +30,7 @@ export class NDIOutputProvider implements OutputProvider {
 
     if (typeof window !== 'undefined' && window.electronAPI?.ndiGetStatus) {
       try {
-        const { status, reason } = await window.electronAPI.ndiGetStatus();
+        const { status, reason } = await window.electronAPI.ndiGetStatus(LEGACY_NDI_TARGET_ID);
         if (status === 'unavailable') {
           const msg = reason ?? 'grandiose not installed — NDI SDK missing';
           this.setStatus('unavailable', msg);
@@ -43,7 +45,8 @@ export class NDIOutputProvider implements OutputProvider {
       }
 
       // Listen for status pushes from the main process
-      window.electronAPI.onNDIStatusChanged(({ status, error }) => {
+      window.electronAPI.onNDIStatusChanged(({ status, error, targetId }) => {
+        if (targetId && targetId !== LEGACY_NDI_TARGET_ID) return;
         if (status === 'active') {
           this.setStatus('active');
           outputLogger.info('NDI active — streaming via offscreen renderer', this.id);
@@ -68,7 +71,7 @@ export class NDIOutputProvider implements OutputProvider {
     if (typeof window !== 'undefined' && window.electronAPI?.ndiStart) {
       outputLogger.info(`Starting NDI sender "${this.sourceName}"`, this.id);
       // No windowId — main process creates its own offscreen BrowserWindow renderer
-      const result = await window.electronAPI.ndiStart(this.sourceName);
+      const result = await window.electronAPI.ndiStart(this.sourceName, LEGACY_NDI_TARGET_ID);
       if (result.ok) {
         this.setStatus('active');
         outputLogger.info(`NDI sender started — broadcasting as "${this.sourceName}"`, this.id);
@@ -100,7 +103,7 @@ export class NDIOutputProvider implements OutputProvider {
   async stop(): Promise<void> {
     if (this.status === 'unavailable') return;
     if (typeof window !== 'undefined' && window.electronAPI?.ndiStop) {
-      window.electronAPI.ndiStop();
+      window.electronAPI.ndiStop(LEGACY_NDI_TARGET_ID);
     }
     this.setStatus('ready');
     outputLogger.info('NDI Provider stopped', this.id);

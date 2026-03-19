@@ -41,20 +41,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── NDI ─────────────────────────────────────────────────────────
   /** Start NDI output. Renders into an offscreen window and sends paint frames as NDI stream. */
-  ndiStart: (sourceName: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('ndi-start', { sourceName }),
+  ndiStart: (sourceName: string, targetId?: string): Promise<{ ok: boolean; error?: string; targetId?: string }> =>
+    ipcRenderer.invoke('ndi-start', { sourceName, targetId }),
 
   /** Stop NDI output. */
-  ndiStop: () => ipcRenderer.send('ndi-stop'),
+  ndiStop: (targetId?: string) => ipcRenderer.send('ndi-stop', { targetId }),
 
   /** Get current NDI status from main process. */
-  ndiGetStatus: (): Promise<{ status: string; reason?: string }> =>
-    ipcRenderer.invoke('ndi-get-status'),
+  ndiGetStatus: (targetId?: string): Promise<{ status: string; reason?: string; sourceName?: string; targetId?: string; activeCount?: number }> =>
+    ipcRenderer.invoke('ndi-get-status', { targetId }),
 
   /** Subscribe to NDI status changes pushed from main. */
-  onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string }) => void) => {
-    ipcRenderer.removeAllListeners('ndi-status-changed');
-    ipcRenderer.on('ndi-status-changed', (_event, payload) => callback(payload));
+  onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => callback(payload);
+    ipcRenderer.on('ndi-status-changed', listener);
+    return () => ipcRenderer.removeListener('ndi-status-changed', listener);
   },
 
   /** Open a URL in the system's default browser (safe external link handler) */

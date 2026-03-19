@@ -1,7 +1,7 @@
 {
   "name": "scriptureflow",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -15,7 +15,8 @@
     "setup-bibles:force": "node scripts/download-bibles.js --force",
     "electron:compile": "node scripts/prepare-electron-cjs.cjs && tsc --project tsconfig.electron.json",
     "electron:dev": "node scripts/electron-dev.cjs",
-    "electron:start": "npm run electron:compile && cross-env NODE_ENV=development electron .",
+    "electron:start": "npm run electron:build && cross-env NODE_ENV=production electron .",
+    "electron:start:dev": "npm run electron:dev",
     "electron:build": "npm run build && npm run electron:compile",
     "setup-ndi": "electron-rebuild -f -w grandiose",
     "electron:pack": "npm run electron:build && electron-builder --publish never",

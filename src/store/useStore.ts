@@ -378,7 +378,7 @@ export const useStore = create<AppState>()(
         });
 
         if (scripture) {
-          const { settings, themes, activeThemeId, outputTargets } = get();
+          const { settings, themes, activeThemeId, outputTargets, providerStatuses } = get();
           const content = {
             reference: `${scripture.book} ${scripture.chapter}:${scripture.verse}${scripture.endVerse ? `-${scripture.endVerse}` : ''}`,
             text: scripture.text,
@@ -424,18 +424,24 @@ export const useStore = create<AppState>()(
           };
 
           if (typeof window !== 'undefined' && window.electronAPI) {
-            // 1. Send per-target payload to each Electron display window (window-type targets)
-            for (const target of enabledTargets.filter(t => !t.type || t.type === 'window')) {
-              window.electronAPI.sendToLive(target.id, buildPayload(target));
+            // Send per-target payload to every enabled channel.
+            // Window targets route to their own window id.
+            // NDI targets route to per-target offscreen ids: "__ndi__:<targetId>".
+            for (const target of enabledTargets) {
+              const routeId = target.type === 'ndi' ? `__ndi__:${target.id}` : target.id;
+              window.electronAPI.sendToLive(routeId, buildPayload(target));
             }
 
-            // 2. Send the first enabled NDI target's themed payload to the NDI offscreen renderer.
-            //    The main process registered that renderer as '__ndi__' in liveWindows,
-            //    so sendToLive routes the data there. Paint events turn it into NDI frames —
-            //    no capturePage, no polling, no visible window required.
-            const ndiTarget = enabledTargets.find(t => t.type === 'ndi');
-            if (ndiTarget) {
-              window.electronAPI.sendToLive('__ndi__', buildPayload(ndiTarget));
+            // Backward compatibility: if no explicit NDI targets are enabled but the
+            // legacy global NDI provider is active, feed the legacy route "__ndi__".
+            const hasEnabledNDITarget = enabledTargets.some(t => t.type === 'ndi');
+            if (!hasEnabledNDITarget && providerStatuses?.ndi?.status === 'active') {
+              const fallbackTarget = enabledTargets.find(t => t.id === 'main')
+                ?? enabledTargets.filter(t => !t.type || t.type === 'window')[0]
+                ?? enabledTargets[0];
+              if (fallbackTarget) {
+                window.electronAPI.sendToLive('__ndi__', buildPayload(fallbackTarget));
+              }
             }
           }
 
@@ -461,12 +467,18 @@ export const useStore = create<AppState>()(
         }
         set({ liveScripture: null });
         get().setLiveOutputState({ currentScripture: null, previewDiffersFromLive: get().previewScripture !== null });
-        // Clear all enabled output windows — NDI must route to '__ndi__', not the target UUID
-        const { outputTargets } = get();
+        // Clear all enabled output windows.
+        const { outputTargets, providerStatuses } = get();
         if (typeof window !== 'undefined' && window.electronAPI) {
           for (const target of outputTargets.filter(t => t.enabled)) {
-            const routeId = target.type === 'ndi' ? '__ndi__' : target.id;
+            const routeId = target.type === 'ndi' ? `__ndi__:${target.id}` : target.id;
             window.electronAPI!.sendToLive(routeId, { type: 'clear' });
+          }
+
+          // Backward compatibility for legacy global NDI provider route.
+          const hasEnabledNDITarget = outputTargets.some(t => t.enabled && t.type === 'ndi');
+          if (!hasEnabledNDITarget && providerStatuses?.ndi?.status === 'active') {
+            window.electronAPI!.sendToLive('__ndi__', { type: 'clear' });
           }
         }
         import('../lib/output/OutputProviderManager').then(({ outputManager }) => {

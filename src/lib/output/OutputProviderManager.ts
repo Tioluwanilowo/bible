@@ -32,9 +32,29 @@ class OutputProviderManager {
 
     for (const provider of this.providers.values()) {
       await provider.initialize();
-      
+
+      // NDI is controlled per target in Settings -> Outputs & Display.
+      // Never auto-start legacy/global NDI stream from persisted provider toggles.
+      if (provider.id === 'ndi') {
+        // Safety: ensure any stale legacy/default NDI session is stopped.
+        try { window.electronAPI?.ndiStop?.('__legacy__'); } catch { /* ignore */ }
+
+        if (settings?.providers?.[provider.id]?.enabled && state.setOutputSettings) {
+          state.setOutputSettings({
+            providers: {
+              ...(state.outputSettings?.providers || {}),
+              [provider.id]: { enabled: false },
+            },
+          });
+        }
+        if (state.setProviderStatus) {
+          state.setProviderStatus(provider.id, provider.status, provider.errorMessage);
+        }
+        continue;
+      }
+
       // Auto-start if enabled in settings
-      if (settings?.providers[provider.id]?.enabled) {
+      if (settings?.providers?.[provider.id]?.enabled) {
         await this.startProvider(provider.id);
       } else {
         provider.status = provider.status === 'unavailable' ? 'unavailable' : 'disabled';
@@ -69,6 +89,7 @@ class OutputProviderManager {
   }
 
   public async startProvider(id: string) {
+    if (id === 'ndi') return;
     const provider = this.providers.get(id);
     if (provider) {
       await provider.start();
@@ -76,6 +97,7 @@ class OutputProviderManager {
   }
 
   public async stopProvider(id: string) {
+    if (id === 'ndi') return;
     const provider = this.providers.get(id);
     if (provider) {
       await provider.stop();

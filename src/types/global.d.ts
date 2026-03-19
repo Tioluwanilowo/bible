@@ -16,10 +16,10 @@ declare global {
       onDisplaysChanged: (callback: (displays: any[]) => void) => void;
 
       // NDI — offscreen renderer approach; no windowId needed
-      ndiStart: (sourceName: string) => Promise<{ ok: boolean; error?: string }>;
-      ndiStop: () => void;
-      ndiGetStatus: () => Promise<{ status: string; reason?: string }>;
-      onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string }) => void) => void;
+      ndiStart: (sourceName: string, targetId?: string) => Promise<{ ok: boolean; error?: string; targetId?: string }>;
+      ndiStop: (targetId?: string) => void;
+      ndiGetStatus: (targetId?: string) => Promise<{ status: string; reason?: string; sourceName?: string; targetId?: string; activeCount?: number }>;
+      onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => void) => (() => void) | void;
 
       /** Open a URL in the system default browser */
       openExternal?: (url: string) => void;

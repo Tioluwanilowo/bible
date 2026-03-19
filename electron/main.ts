@@ -82,11 +82,30 @@ const DEV_SERVER_URL = isDev ? getDevServerUrl() : '';
 // and feeds paint-event BGRA frames directly into the NDI SDK.
 // No visible window or capturePage polling needed.
 
-const NDI_WINDOW_ID = '__ndi__';   // key in liveWindows for the hidden NDI renderer
-let ndiSender: any = null;
+const NDI_LEGACY_WINDOW_ID = '__ndi__'; // legacy alias for older renderer routes
+const NDI_WINDOW_PREFIX = '__ndi__:';
+const NDI_LEGACY_TARGET_ID = '__legacy__';
+
+type NDIStatus = {
+  status: 'active' | 'stopped' | 'unavailable' | 'error';
+  reason?: string;
+  error?: string;
+  sourceName?: string;
+  targetId?: string;
+  activeCount?: number;
+};
+
+type NDISession = {
+  targetId: string;
+  windowId: string;
+  sourceName: string;
+  sender: any;
+  repaintTimer: ReturnType<typeof setInterval> | null;
+};
+
+const ndiSessions = new Map<string, NDISession>();
 let ndiGrandiose: any = null;      // cached after first successful load
 let ndiLoadError: string | null = null;  // last error from require('grandiose')
-let ndiRepaintTimer: ReturnType<typeof setInterval> | null = null;
 
 // Known NDI Runtime install locations on Windows.
 // The packaged app may not inherit the user's PATH, so we prepend these
@@ -183,57 +202,111 @@ function ndiUnavailableReason(): string {
  * page. Every time the renderer paints a frame, the raw BGRA pixels are sent
  * straight to the NDI SDK sender — no polling, no capturePage overhead.
  */
-function startNDI(sourceName: string): { ok: boolean; error?: string } {
-  stopNDI(false);
+function normalizeNDITargetId(targetId?: string): string {
+  if (typeof targetId !== 'string') return NDI_LEGACY_TARGET_ID;
+  const trimmed = targetId.trim();
+  return trimmed.length > 0 ? trimmed : NDI_LEGACY_TARGET_ID;
+}
+
+function getNDIWindowId(targetId?: string): string {
+  return `${NDI_WINDOW_PREFIX}${normalizeNDITargetId(targetId)}`;
+}
+
+function isNDIWindowId(windowId: string): boolean {
+  return windowId === NDI_LEGACY_WINDOW_ID || windowId.startsWith(NDI_WINDOW_PREFIX);
+}
+
+function destroyNDISession(session: NDISession): void {
+  if (session.repaintTimer) {
+    clearInterval(session.repaintTimer);
+    session.repaintTimer = null;
+  }
+
+  if (session.sender) {
+    try { session.sender.destroy?.(); } catch { /* ignore */ }
+    session.sender = null;
+  }
+
+  const offscreenWin = liveWindows.get(session.windowId);
+  if (offscreenWin && !offscreenWin.isDestroyed()) {
+    try { offscreenWin.destroy(); } catch { /* ignore */ }
+  }
+
+  liveWindows.delete(session.windowId);
+  if (ndiSessions.get(session.targetId) === session) {
+    ndiSessions.delete(session.targetId);
+  }
+}
+
+function stopAllNDI(notify = true): void {
+  const sessions = Array.from(ndiSessions.values());
+  for (const session of sessions) {
+    const stoppedTargetId = session.targetId;
+    destroyNDISession(session);
+    if (notify) {
+      mainWindow?.webContents.send('ndi-status-changed', {
+        status: 'stopped',
+        targetId: stoppedTargetId,
+        activeCount: ndiSessions.size,
+      } satisfies NDIStatus);
+    }
+  }
+}
+
+function startNDI(sourceName: string, targetId?: string): { ok: boolean; error?: string; targetId: string } {
+  const resolvedTargetId = normalizeNDITargetId(targetId);
+  stopNDI(resolvedTargetId, false);
 
   const grandiose = loadGrandiose();
   if (!grandiose) {
-    return { ok: false, error: ndiUnavailableReason() };
+    return { ok: false, error: ndiUnavailableReason(), targetId: resolvedTargetId };
   }
 
-  // ── Create NDI sender first (fast — just registers the source name) ──
+  let sender: any = null;
   try {
-    ndiSender = grandiose.send({ name: sourceName, clockVideo: true, clockAudio: false });
+    sender = grandiose.send({ name: sourceName, clockVideo: true, clockAudio: false });
   } catch (err: any) {
-    ndiSender = null;
+    sender = null;
     return {
       ok: false,
       error: `NDI SDK error: ${err.message}. Make sure NDI Runtime is installed from ndi.video`,
+      targetId: resolvedTargetId,
     };
   }
 
-  // ── Create offscreen renderer ──────────────────────────────────
+  const windowId = getNDIWindowId(resolvedTargetId);
+  const sessionState: NDISession = {
+    targetId: resolvedTargetId,
+    windowId,
+    sourceName,
+    sender,
+    repaintTimer: null,
+  };
+
   const offscreenWin = new BrowserWindow({
     width: 1920,
     height: 1080,
-    show: false,                    // completely hidden — no taskbar entry
-    // transparent: true is intentionally omitted — on Windows, combining
-    // transparent + offscreen + show:false prevents the compositor from
-    // initialising and causes ERR_FAILED (-2) when loading the renderer URL.
-    // Alpha transparency for NDI comes from the CSS/content (body { background: transparent })
-    // and is carried in the BGRA pixel data via toBitmap() — the window chrome
-    // transparency flag is not needed for correct NDI alpha output.
-    backgroundColor: '#00000000',  // zero-alpha background so content transparency is preserved
+    show: false,
+    backgroundColor: '#00000000',
     webPreferences: {
-      offscreen: true,              // render into memory, fire paint events
-      contextIsolation: false,      // allow executeJavaScript to reach window globals
+      offscreen: true,
+      contextIsolation: false,
       nodeIntegration: false,
-      webSecurity: false,           // allow loading from localhost in offscreen context
+      webSecurity: false,
     },
   });
 
-  // Register window immediately so scripture data can be routed here
-  liveWindows.set(NDI_WINDOW_ID, offscreenWin);
+  liveWindows.set(windowId, offscreenWin);
+  ndiSessions.set(resolvedTargetId, sessionState);
 
-  // ── Wire paint events before loading URL so no frames are missed ──
   offscreenWin.webContents.setFrameRate(30);
   offscreenWin.webContents.on('paint', (_event, _dirty, image) => {
-    if (!ndiSender) return;
+    if (!sessionState.sender) return;
     const size = image.getSize();
     if (size.width === 0 || size.height === 0) return;
-    const frameData = image.toBitmap();   // raw BGRA buffer
+    const frameData = image.toBitmap();
     try {
-      ndiSender.video({
+      sessionState.sender.video({
         xres: size.width,
         yres: size.height,
         frameRateN: 30 * 1000,
@@ -247,21 +320,23 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
   });
 
   offscreenWin.webContents.startPainting();
-
-  // Force a repaint every second so NDI keeps streaming even on static content.
-  // Without this, paint events stop firing after the initial render and OBS
-  // shows a frozen or dropped source.
-  ndiRepaintTimer = setInterval(() => {
-    const win = liveWindows.get(NDI_WINDOW_ID);
+  sessionState.repaintTimer = setInterval(() => {
+    const win = liveWindows.get(windowId);
     if (win && !win.isDestroyed()) win.webContents.invalidate();
   }, 1000);
 
   offscreenWin.on('closed', () => {
-    liveWindows.delete(NDI_WINDOW_ID);
+    liveWindows.delete(windowId);
+    const current = ndiSessions.get(resolvedTargetId);
+    if (current === sessionState) {
+      if (current.repaintTimer) {
+        clearInterval(current.repaintTimer);
+        current.repaintTimer = null;
+      }
+      ndiSessions.delete(resolvedTargetId);
+    }
   });
 
-  // ── Load the live renderer page in the background (non-blocking) ──
-  // NDI source is already visible in OBS; frames start flowing once page renders.
   const url = isDev
     ? `${DEV_SERVER_URL}/live.html`
     : `file://${path.join(__dirname, '../dist/live.html')}`;
@@ -270,49 +345,68 @@ function startNDI(sourceName: string): { ok: boolean; error?: string } {
     console.error('[NDI] Renderer load failed:', err.message);
   });
 
-  // ── Diagnostic: verify sender is visible to NDI find ──────────────
-  // Runs 5 s after start so the sender has time to register on the network.
-  // Check DevTools console for "[NDI] Visible sources" to confirm discovery.
   setTimeout(() => {
     try {
       grandiose.find({ showLocalSources: true, wait: 5000 }).then((sources: any[]) => {
         console.log(`[NDI] Visible sources (${sources.length}):`, sources.map((s: any) => s.name));
         if (!sources.some((s: any) => s.name && s.name.toLowerCase().includes('scriptureflow'))) {
-          console.warn('[NDI] ScriptureFlow not in discovery list — check Windows Firewall and network profile (must be Private, not Public)');
+          console.warn(`[NDI] ${sourceName} (target: ${resolvedTargetId}) not in discovery list - check Windows Firewall and network profile (must be Private, not Public)`);
         }
       }).catch(() => {});
     } catch { /* grandiose.find may not exist in all versions */ }
   }, 3000);
 
-  return { ok: true };
+  return { ok: true, targetId: resolvedTargetId };
 }
 
-function stopNDI(notify = true) {
-  if (ndiRepaintTimer) {
-    clearInterval(ndiRepaintTimer);
-    ndiRepaintTimer = null;
+function stopNDI(targetId?: string, notify = true): void {
+  const resolvedTargetId = normalizeNDITargetId(targetId);
+  const session = ndiSessions.get(resolvedTargetId);
+  if (session) {
+    destroyNDISession(session);
   }
-
-  if (ndiSender) {
-    try { ndiSender.destroy?.(); } catch { /* ignore */ }
-    ndiSender = null;
-  }
-
-  const offscreenWin = liveWindows.get(NDI_WINDOW_ID);
-  if (offscreenWin && !offscreenWin.isDestroyed()) {
-    offscreenWin.destroy();
-  }
-  liveWindows.delete(NDI_WINDOW_ID);
 
   if (notify) {
-    mainWindow?.webContents.send('ndi-status-changed', { status: 'stopped' });
+    mainWindow?.webContents.send('ndi-status-changed', {
+      status: 'stopped',
+      targetId: resolvedTargetId,
+      activeCount: ndiSessions.size,
+    } satisfies NDIStatus);
   }
 }
 
-function getNDIStatus(): { status: string; reason?: string } {
+function getNDIStatus(targetId?: string): NDIStatus {
   if (!loadGrandiose()) return { status: 'unavailable', reason: ndiUnavailableReason() };
-  if (ndiSender) return { status: 'active' };
-  return { status: 'stopped' };
+
+  if (typeof targetId === 'string' && targetId.trim().length > 0) {
+    const resolvedTargetId = normalizeNDITargetId(targetId);
+    const session = ndiSessions.get(resolvedTargetId);
+    if (session) {
+      return {
+        status: 'active',
+        targetId: resolvedTargetId,
+        sourceName: session.sourceName,
+        activeCount: ndiSessions.size,
+      };
+    }
+    return {
+      status: 'stopped',
+      targetId: resolvedTargetId,
+      activeCount: ndiSessions.size,
+    };
+  }
+
+  const firstSession = ndiSessions.values().next().value as NDISession | undefined;
+  if (firstSession) {
+    return {
+      status: 'active',
+      targetId: firstSession.targetId,
+      sourceName: firstSession.sourceName,
+      activeCount: ndiSessions.size,
+    };
+  }
+
+  return { status: 'stopped', activeCount: 0 };
 }
 
 // ── Window helpers ─────────────────────────────────────────────────
@@ -361,7 +455,7 @@ function createMainWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-    stopNDI(false);
+    stopAllNDI(false);
     closeRealtimeWs();
     closeDeepgramWs();
     liveWindows.forEach(win => { try { win.close(); } catch { /* ignore */ } });
@@ -612,7 +706,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  stopNDI(false);
+  stopAllNDI(false);
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -621,9 +715,18 @@ app.on('window-all-closed', () => {
 // ── IPC: Live window ───────────────────────────────────────────────
 
 ipcMain.on('send-to-live', (event, { windowId = 'main', data }: { windowId?: string; data: any }) => {
-  const win = liveWindows.get(windowId);
+  let resolvedWindowId = windowId;
+  if (windowId === NDI_LEGACY_WINDOW_ID) {
+    resolvedWindowId = getNDIWindowId();
+    if (!liveWindows.has(resolvedWindowId)) {
+      const firstSession = ndiSessions.values().next().value as NDISession | undefined;
+      if (firstSession) resolvedWindowId = firstSession.windowId;
+    }
+  }
+
+  const win = liveWindows.get(resolvedWindowId);
   if (!win || win.isDestroyed()) return;
-  if (windowId === NDI_WINDOW_ID) {
+  if (isNDIWindowId(resolvedWindowId)) {
     // NDI offscreen window has no preload — push data via executeJavaScript
     win.webContents.executeJavaScript(
       `window.__ndiUpdate && window.__ndiUpdate(${JSON.stringify(data)})`
@@ -676,18 +779,20 @@ ipcMain.on('move-live-window', (event, { windowId = 'main', displayId }: { windo
 
 // ── IPC: NDI ───────────────────────────────────────────────────────
 
-ipcMain.handle('ndi-start', (_event, { sourceName }: { sourceName: string }) => {
-  const result = startNDI(sourceName);
+ipcMain.handle('ndi-start', (_event, { sourceName, targetId }: { sourceName: string; targetId?: string }) => {
+  const result = startNDI(sourceName, targetId);
   mainWindow?.webContents.send('ndi-status-changed', {
     status: result.ok ? 'active' : 'error',
+    targetId: result.targetId,
     sourceName: result.ok ? sourceName : undefined,
     error: result.error,
+    activeCount: ndiSessions.size,
   });
   return result;
 });
 
-ipcMain.on('ndi-stop', () => {
-  stopNDI(true);
+ipcMain.on('ndi-stop', (_event, payload?: { targetId?: string }) => {
+  stopNDI(payload?.targetId, true);
 });
 
 ipcMain.on('open-external', (_event, url: string) => {
@@ -793,8 +898,8 @@ function registerRealtimeHandlers(): void {
   console.log('[Main] Realtime IPC handlers registered ✓');
 }
 
-ipcMain.handle('ndi-get-status', () => {
-  return getNDIStatus();   // already returns { status, reason? }
+ipcMain.handle('ndi-get-status', (_event, payload?: { targetId?: string }) => {
+  return getNDIStatus(payload?.targetId);
 });
 
 // ── IPC: Deepgram WebSocket bridge ─────────────────────────────────────────────
@@ -886,3 +991,4 @@ function registerDeepgramHandlers(): void {
 
   console.log('[Main] Deepgram IPC handlers registered ✓');
 }
+

@@ -10,6 +10,8 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
+const LEGACY_NDI_TARGET_ID = '__legacy__';
+
 export default function SettingsModal({ onClose }: SettingsModalProps) {
   const {
     settings, updateSettings, updatePresentationSettings,
@@ -26,12 +28,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [showChatGptKey, setShowChatGptKey] = useState(false);
   const [showDeepgramKey, setShowDeepgramKey] = useState(false);
 
-  // NDI controls (Output Providers tab — global NDI toggle)
-  const [ndiSourceName, setNdiSourceName] = useState('ScriptureFlow');
-  const [ndiWorking, setNdiWorking] = useState(false);
-
   // NDI channel controls (Outputs & Display tab — per-target NDI)
-  const [ndiActiveTargetId, setNdiActiveTargetId] = useState<string | null>(null);
+  const [ndiActiveTargets, setNdiActiveTargets] = useState<Record<string, boolean>>({});
   const [ndiTargetWorking, setNdiTargetWorking] = useState<string | null>(null);
   const [ndiErrors, setNdiErrors] = useState<Record<string, string>>({});
 
@@ -49,6 +47,49 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       useStore.getState().setAvailableDisplays(displays);
     });
   };
+
+  useEffect(() => {
+    const ndiTargets = outputTargets.filter(t => t.type === 'ndi');
+    if (ndiTargets.length === 0) {
+      setNdiActiveTargets({});
+      return;
+    }
+
+    let cancelled = false;
+
+    Promise.all(
+      ndiTargets.map(async (target) => {
+        try {
+          const status = await window.electronAPI?.ndiGetStatus?.(target.id);
+          return { targetId: target.id, active: status?.status === 'active' };
+        } catch {
+          return { targetId: target.id, active: false };
+        }
+      }),
+    ).then((rows) => {
+      if (cancelled) return;
+      const next: Record<string, boolean> = {};
+      rows.forEach(row => { next[row.targetId] = row.active; });
+      setNdiActiveTargets(next);
+    });
+
+    const unsubscribe = window.electronAPI?.onNDIStatusChanged?.(({ targetId, status, error }) => {
+      if (!targetId || targetId === LEGACY_NDI_TARGET_ID) return;
+      if (status === 'active') {
+        setNdiActiveTargets(prev => ({ ...prev, [targetId]: true }));
+      } else if (status === 'stopped' || status === 'error') {
+        setNdiActiveTargets(prev => ({ ...prev, [targetId]: false }));
+      }
+      if (status === 'error' && error) {
+        setNdiErrors(prev => ({ ...prev, [targetId]: error }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [outputTargets]);
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
@@ -452,8 +493,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                 {outputTargets.map((target) => {
                   const resolvedTheme = themes.find(t => t.id === target.themeId);
                   const isNDI = target.type === 'ndi';
-                  const ndiStreaming = ndiActiveTargetId === target.id;
-                  const ndiStatus = providerStatuses['ndi']?.status;
+                  const ndiStreaming = Boolean(ndiActiveTargets[target.id]);
 
                   return (
                     <div key={target.id} className={`rounded-xl border p-4 space-y-3 transition-colors ${target.enabled ? (isNDI ? 'bg-zinc-950 border-emerald-900/40' : 'bg-zinc-950 border-zinc-700') : 'bg-zinc-900/50 border-zinc-800 opacity-60'}`}>
@@ -461,7 +501,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                       {/* Row 1: type icon + label + status badge + enable toggle + remove */}
                       <div className="flex items-center gap-2">
                         {isNDI
-                          ? <Radio className={`w-4 h-4 shrink-0 ${ndiStreaming && ndiStatus === 'active' ? 'text-emerald-400' : 'text-zinc-600'}`} />
+                          ? <Radio className={`w-4 h-4 shrink-0 ${ndiStreaming ? 'text-emerald-400' : 'text-zinc-600'}`} />
                           : <MonitorCheck className={`w-4 h-4 shrink-0 ${target.windowOpen ? 'text-emerald-400' : 'text-zinc-600'}`} />
                         }
                         <input
@@ -471,9 +511,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                         />
                         {/* Status dot */}
                         {isNDI ? (
-                          <span className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${ndiStreaming && ndiStatus === 'active' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
-                            <Circle className={`w-1.5 h-1.5 ${ndiStreaming && ndiStatus === 'active' ? 'fill-emerald-400' : 'fill-zinc-500'}`} />
-                            {ndiStreaming && ndiStatus === 'active' ? 'Streaming' : 'NDI'}
+                          <span className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${ndiStreaming ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                            <Circle className={`w-1.5 h-1.5 ${ndiStreaming ? 'fill-emerald-400' : 'fill-zinc-500'}`} />
+                            {ndiStreaming ? 'Streaming' : 'NDI'}
                           </span>
                         ) : (
                           <span className={`flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0 ${target.windowOpen ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
@@ -484,15 +524,22 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                         {/* Enable toggle */}
                         <label className="relative inline-flex items-center cursor-pointer shrink-0">
                           <input type="checkbox" className="sr-only peer" checked={target.enabled}
-                            onChange={e => updateOutputTarget(target.id, { enabled: e.target.checked })} />
+                            onChange={e => {
+                              const enabled = e.target.checked;
+                              updateOutputTarget(target.id, { enabled });
+                              if (isNDI && !enabled) {
+                                window.electronAPI?.ndiStop?.(target.id);
+                                setNdiActiveTargets(prev => ({ ...prev, [target.id]: false }));
+                              }
+                            }} />
                           <div className="w-9 h-5 bg-zinc-700 rounded-full peer peer-checked:bg-indigo-600 relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
                         </label>
                         {/* Remove */}
                         {(outputTargets.length > 1 || isNDI) && (
                           <button onClick={() => {
-                            if (isNDI && ndiActiveTargetId === target.id) {
-                              window.electronAPI?.ndiStop?.();
-                              setNdiActiveTargetId(null);
+                            if (isNDI && ndiStreaming) {
+                              window.electronAPI?.ndiStop?.(target.id);
+                              setNdiActiveTargets(prev => ({ ...prev, [target.id]: false }));
                             }
                             removeOutputTarget(target.id);
                           }}
@@ -575,15 +622,15 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                             <>
                               <div className="flex gap-2">
                                 <button
-                                  disabled={ndiTargetWorking === target.id || (ndiStreaming && ndiStatus === 'active')}
+                                  disabled={ndiTargetWorking === target.id || ndiStreaming}
                                   onClick={async () => {
                                     setNdiTargetWorking(target.id);
                                     setNdiErrors(prev => ({ ...prev, [target.id]: '' }));
                                     try {
                                       const srcName = target.ndiSourceName || 'ScriptureFlow';
-                                      const result = await window.electronAPI?.ndiStart(srcName);
+                                      const result = await window.electronAPI?.ndiStart(srcName, target.id);
                                       if (result?.ok) {
-                                        setNdiActiveTargetId(target.id);
+                                        setNdiActiveTargets(prev => ({ ...prev, [target.id]: true }));
                                       } else if (result?.error) {
                                         setNdiErrors(prev => ({ ...prev, [target.id]: result.error! }));
                                       }
@@ -595,20 +642,20 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                                   }}
                                   className="flex-1 py-1.5 text-xs rounded-lg font-medium transition-colors bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
-                                  {ndiTargetWorking === target.id ? 'Starting…' : (ndiStreaming && ndiStatus === 'active') ? '● Streaming' : 'Start NDI'}
+                                  {ndiTargetWorking === target.id ? 'Starting...' : ndiStreaming ? 'Streaming' : 'Start NDI'}
                                 </button>
                                 <button
-                                  disabled={!(ndiStreaming && ndiStatus === 'active')}
+                                  disabled={!ndiStreaming}
                                   onClick={() => {
-                                    window.electronAPI?.ndiStop?.();
-                                    setNdiActiveTargetId(null);
+                                    window.electronAPI?.ndiStop?.(target.id);
+                                    setNdiActiveTargets(prev => ({ ...prev, [target.id]: false }));
                                   }}
                                   className="flex-1 py-1.5 text-xs rounded-lg font-medium transition-colors bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                   Stop NDI
                                 </button>
                               </div>
-                              {ndiStreaming && ndiStatus === 'active' && (
+                              {ndiStreaming && (
                                 <p className="text-[10px] text-emerald-400">
                                   ✓ Broadcasting as <strong>"{target.ndiSourceName || 'ScriptureFlow'}"</strong> — visible to OBS / vMix on this network
                                 </p>
@@ -713,71 +760,35 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                           <p className="text-xs text-zinc-500 mt-1">{provider.type}</p>
                           {provider.errorMessage && <p className="text-xs text-red-400 mt-1">{provider.errorMessage}</p>}
                         </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox" className="sr-only peer"
-                            checked={outputSettings?.providers?.[provider.id]?.enabled ?? false}
-                            disabled={provider.status === 'unavailable'}
-                            onChange={(e) => {
-                              const enabled = e.target.checked;
-                              setOutputSettings({ providers: { ...(outputSettings?.providers || {}), [provider.id]: { enabled } } });
-                              import('../lib/output/OutputProviderManager').then(({ outputManager }) => {
-                                if (enabled) outputManager.startProvider(provider.id);
-                                else outputManager.stopProvider(provider.id);
-                              });
-                            }}
-                          />
-                          <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600 disabled:opacity-50" />
-                        </label>
-                      </div>
-
-                      {/* NDI-specific controls */}
-                      {provider.id === 'ndi' && provider.status !== 'unavailable' && (
-                        <div className="px-4 pb-4 pt-0 border-t border-zinc-800/60 space-y-3">
-                          <p className="text-[10px] text-zinc-500 pt-3">
-                            Captures the selected live window at 30 fps and broadcasts it as an NDI™ source on your local network.
-                            Requires <span className="text-zinc-300">NDI Runtime</span> from ndi.video and <span className="text-zinc-300">grandiose</span> npm package.
-                          </p>
-                          <div className="grid grid-cols-1 gap-3">
-                            <div>
-                              <label className="block text-[10px] text-zinc-400 mb-1">NDI Source Name</label>
-                              <input
-                                type="text"
-                                value={ndiSourceName}
-                                onChange={e => setNdiSourceName(e.target.value)}
-                                placeholder="ScriptureFlow"
-                                className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex gap-2 pt-1">
-                            <button
-                              disabled={ndiWorking || provider.status === 'active'}
-                              onClick={async () => {
-                                setNdiWorking(true);
-                                try {
-                                  await window.electronAPI?.ndiStart(ndiSourceName || 'ScriptureFlow');
-                                } finally {
-                                  setNdiWorking(false);
-                                }
+                        {provider.id === 'ndi' ? (
+                          <span className="px-2 py-1 rounded text-[10px] font-medium bg-zinc-800 text-zinc-300">
+                            Managed in Outputs & Display
+                          </span>
+                        ) : (
+                          <label className="relative inline-flex items-center cursor-pointer">
+                            <input
+                              type="checkbox" className="sr-only peer"
+                              checked={outputSettings?.providers?.[provider.id]?.enabled ?? false}
+                              disabled={provider.status === 'unavailable'}
+                              onChange={(e) => {
+                                const enabled = e.target.checked;
+                                setOutputSettings({ providers: { ...(outputSettings?.providers || {}), [provider.id]: { enabled } } });
+                                import('../lib/output/OutputProviderManager').then(({ outputManager }) => {
+                                  if (enabled) outputManager.startProvider(provider.id);
+                                  else outputManager.stopProvider(provider.id);
+                                });
                               }}
-                              className="flex-1 py-1.5 text-xs rounded-lg font-medium transition-colors bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              {ndiWorking ? 'Starting…' : provider.status === 'active' ? '● Streaming' : 'Start NDI'}
-                            </button>
-                            <button
-                              disabled={provider.status !== 'active'}
-                              onClick={() => window.electronAPI?.ndiStop()}
-                              className="flex-1 py-1.5 text-xs rounded-lg font-medium transition-colors bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              Stop NDI
-                            </button>
-                          </div>
-                          {provider.status === 'active' && (
-                            <p className="text-[10px] text-emerald-400">
-                              ✓ Broadcasting as <strong>"{ndiSourceName || 'ScriptureFlow'}"</strong> — visible to all NDI receivers on this network
-                            </p>
-                          )}
+                            />
+                            <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600 disabled:opacity-50" />
+                          </label>
+                        )}
+                      </div>
+                      {provider.id === 'ndi' && provider.status !== 'unavailable' && (
+                        <div className="px-4 pb-4 pt-0 border-t border-zinc-800/60">
+                          <p className="text-[10px] text-zinc-500 pt-3 leading-relaxed">
+                            NDI channels are controlled in the <strong className="text-zinc-300">Outputs & Display</strong> tab.
+                            Add one or more NDI outputs there and start/stop each source per channel.
+                          </p>
                         </div>
                       )}
 
@@ -839,20 +850,20 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                 </div>
               </div>
 
-              {/* NDI → redirect to Output Providers */}
+              {/* NDI → redirect to Outputs & Display */}
               <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-5 flex items-start space-x-4">
                 <Tv className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
                 <div className="flex-1">
                   <h4 className="text-sm font-semibold text-emerald-300">NDI Network Output</h4>
                   <p className="text-xs text-emerald-400/80 mt-1 leading-relaxed">
                     NDI output (visible to OBS, vMix, Tricaster and all NDI receivers on your network)
-                    is configured in the <strong className="text-emerald-300">Output Providers</strong> tab.
+                    is configured in the <strong className="text-emerald-300">Outputs & Display</strong> tab.
                   </p>
                   <button
-                    onClick={() => setActiveTab('output')}
+                    onClick={() => setActiveTab('presentation')}
                     className="mt-3 px-4 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium rounded-lg transition-colors"
                   >
-                    Go to Output Providers →
+                    Go to Outputs & Display →
                   </button>
                 </div>
               </div>

@@ -103,12 +103,14 @@ export class ReferenceStateEngine {
     // The anti-hallucination book check also benefits — the book name may have
     // appeared in an earlier chunk rather than the most recent one.
     const sourceText = buffer.map(t => t.text).join(' ');
+    const latestText = buffer[buffer.length - 1]?.text ?? '';
     const result = this.resolveCommand(
       aiResponse,
       confirmedRef,
       activePending,
       version,
       sourceText,
+      latestText,
     );
 
     // Merge expired-pending signal with resolve result
@@ -126,24 +128,37 @@ export class ReferenceStateEngine {
     pending:     PendingRef   | null,
     version:     string,
     sourceText:  string,
+    latestText:  string,
   ): InterpretResult {
+    const blockRelativeNav = this.shouldBlockRelativeNavigation(confirmed, pending);
+
     switch (ai.command) {
       case 'set_reference':
         return this.resolveSetReference(ai, confirmed, pending, version, sourceText);
 
       case 'jump_to_verse':
+        if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
+        if (blockRelativeNav) return {};
         return this.resolveJumpToVerse(ai, confirmed, version, sourceText);
 
       case 'next_verse':
+        if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
+        if (blockRelativeNav) return {};
         return this.resolveNextVerse(confirmed, version, sourceText);
 
       case 'previous_verse':
+        if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
+        if (blockRelativeNav) return {};
         return this.resolvePrevVerse(confirmed, version, sourceText);
 
       case 'next_chapter':
+        if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
+        if (blockRelativeNav) return {};
         return this.resolveNextChapter(confirmed, version, sourceText);
 
       case 'previous_chapter':
+        if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
+        if (blockRelativeNav) return {};
         return this.resolvePrevChapter(confirmed, version, sourceText);
 
       case 'change_translation':
@@ -154,6 +169,67 @@ export class ReferenceStateEngine {
         // Nothing to do; no change to pending
         return {};
     }
+  }
+
+  private hasRelativeNavigationCue(
+    text:    string,
+    command: AIResponse['command'],
+  ): boolean {
+    const t = text.toLowerCase();
+    if (!t.trim()) return false;
+
+    switch (command) {
+      case 'next_verse':
+        return /\b(next verse|continue(?: reading)?|carry on|moving on|move forward|read on|keep reading|and verse\s+\d+)\b/.test(t);
+      case 'previous_verse':
+        return /\b(previous verse|back one verse|go back(?: one verse)?|verse before)\b/.test(t);
+      case 'jump_to_verse':
+        return /\b((go|skip|jump)\s+to\s+verse|verse\s+\d+)\b/.test(t);
+      case 'next_chapter':
+        return /\b(next chapter|go to chapter\s+\d+|moving to chapter\s+\d+)\b/.test(t);
+      case 'previous_chapter':
+        return /\b(previous chapter|back a chapter|go back a chapter)\b/.test(t);
+      default:
+        return true;
+    }
+  }
+
+  private sameBookName(a: string, b: string): boolean {
+    const normalizedA = a.toLowerCase().replace(/\s+/g, ' ').trim();
+    const normalizedB = b.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (normalizedA === normalizedB) return true;
+
+    const compactA = a.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const compactB = b.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return compactA === compactB;
+  }
+
+  /**
+   * Guardrail against accidental relative navigation ("continue", "next verse")
+   * while a new target reference is still being assembled (e.g. "Mark 10 ...").
+   */
+  private shouldBlockRelativeNavigation(
+    confirmed: ConfirmedRef | null,
+    pending:   PendingRef   | null,
+  ): boolean {
+    if (!confirmed || !pending) return false;
+
+    const hasPendingContext =
+      typeof pending.book === 'string' ||
+      typeof pending.chapter === 'number';
+    if (!hasPendingContext) return false;
+
+    const pendingIsIncomplete = typeof pending.verseStart !== 'number';
+    if (!pendingIsIncomplete) return false;
+
+    const bookConflicts = typeof pending.book === 'string'
+      ? !this.sameBookName(pending.book, confirmed.book)
+      : false;
+    const chapterConflicts = typeof pending.chapter === 'number'
+      ? pending.chapter !== confirmed.chapter
+      : false;
+
+    return bookConflicts || chapterConflicts;
   }
 
   // ── set_reference ─────────────────────────────────────────────────────────
