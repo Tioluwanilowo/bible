@@ -135,18 +135,59 @@ function getGrandioseReleaseDir(): string {
   return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose', 'build', 'Release');
 }
 
+function getGrandioseDllTargets(): string[] {
+  if (isDev) {
+    const root = path.join(process.cwd(), 'node_modules', 'grandiose');
+    return [
+      path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
+      path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
+    ];
+  }
+  const root = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose');
+  return [
+    path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
+    path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
+  ];
+}
+
+function findInstalledNDIRuntimeDll(): string | null {
+  for (const runtimeDir of NDI_RUNTIME_PATHS) {
+    const candidate = path.join(runtimeDir, 'Processing.NDI.Lib.x64.dll');
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+function syncBundledDllWithRuntime(): void {
+  const runtimeDll = findInstalledNDIRuntimeDll();
+  if (!runtimeDll) return;
+
+  for (const target of getGrandioseDllTargets()) {
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(runtimeDll, target);
+      console.log(`[NDI] Synced runtime DLL to ${target}`);
+    } catch (err: any) {
+      console.warn(`[NDI] Could not sync runtime DLL to ${target}: ${err?.message ?? String(err)}`);
+    }
+  }
+}
+
 function logNDIDllDiagnostics(): void {
   if (ndiRuntimeDiagnosticsLogged) return;
   ndiRuntimeDiagnosticsLogged = true;
 
-  const bundledDll = path.join(getGrandioseReleaseDir(), 'Processing.NDI.Lib.x64.dll');
-  if (fs.existsSync(bundledDll)) {
-    console.warn(
-      `[NDI] Bundled Processing.NDI.Lib.x64.dll detected at ${bundledDll}. ` +
-      'This can force legacy NDI discovery and hide sources from NDI v5/v6 receivers.'
-    );
+  const found = getGrandioseDllTargets().filter((dllPath) => {
+    try { return fs.existsSync(dllPath); } catch { return false; }
+  });
+  if (found.length > 0) {
+    console.log(`[NDI] grandiose DLL lookup paths present: ${found.join(', ')}`);
   } else {
-    console.log('[NDI] Bundled Processing.NDI.Lib.x64.dll not present (expected).');
+    console.log('[NDI] grandiose DLL lookup paths currently missing (runtime PATH fallback expected).');
   }
 }
 
@@ -167,8 +208,9 @@ function injectNDIRuntimePaths(): void {
 function loadGrandiose(): any {
   if (ndiGrandiose) return ndiGrandiose;
   // Ensure NDI Runtime DLLs are findable before the first require()
-  logNDIDllDiagnostics();
   injectNDIRuntimePaths();
+  syncBundledDllWithRuntime();
+  logNDIDllDiagnostics();
   try {
     ndiGrandiose = require('grandiose');
     ndiLoadError = null;

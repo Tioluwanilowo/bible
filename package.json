@@ -1,7 +1,7 @@
 {
   "name": "scriptureflow",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -18,9 +18,10 @@
     "electron:start": "npm run electron:build && cross-env NODE_ENV=production electron .",
     "electron:start:dev": "npm run electron:dev",
     "electron:build": "npm run build && npm run electron:compile",
+    "electron:clean-output": "node scripts/clean-release-output.cjs",
     "setup-ndi": "electron-rebuild -f -w grandiose",
-    "electron:pack": "npm run electron:build && electron-builder --publish never",
-    "electron:publish": "npm run electron:build && electron-builder --publish always"
+    "electron:pack": "npm run electron:build && npm run electron:clean-output && electron-builder --publish never",
+    "electron:publish": "npm run electron:build && npm run electron:clean-output && electron-builder --publish always"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

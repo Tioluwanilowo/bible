@@ -6,10 +6,15 @@
 const fs = require('fs');
 const path = require('path');
 
-function removeIfExists(filePath) {
-  if (!fs.existsSync(filePath)) return false;
-  fs.unlinkSync(filePath);
-  return true;
+function walkFiles(dir) {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkFiles(full));
+    else if (entry.isFile()) out.push(full);
+  }
+  return out;
 }
 
 module.exports = async function afterPack(context) {
@@ -21,18 +26,15 @@ module.exports = async function afterPack(context) {
     'grandiose'
   );
 
-  const targets = [
-    path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
-    path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
-  ];
+  const targets = walkFiles(root)
+    .filter((f) => path.basename(f).toLowerCase() === 'processing.ndi.lib.x64.dll');
 
   let removed = 0;
   for (const target of targets) {
     try {
-      if (removeIfExists(target)) {
-        removed += 1;
-        console.log(`[afterPack][NDI] Removed stale bundled DLL: ${target}`);
-      }
+      fs.unlinkSync(target);
+      removed += 1;
+      console.log(`[afterPack][NDI] Removed stale bundled DLL: ${target}`);
     } catch (err) {
       const msg = err && err.message ? err.message : String(err);
       console.warn(`[afterPack][NDI] Failed to remove ${target}: ${msg}`);
