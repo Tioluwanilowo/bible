@@ -1,12 +1,13 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
-import { Play, Square, ChevronLeft, ChevronRight, Snowflake, Pause } from 'lucide-react';
+import { Play, Square, ChevronLeft, ChevronRight, Snowflake, Pause, ListPlus, Send } from 'lucide-react';
 
 export default function Controls() {
   const {
     mode, setMode, version, setVersion, previewScripture, setLive, clearLive,
     isAutoPaused, toggleAutoPause, isLiveFrozen, toggleFreeze,
     nextVerse, prevVerse, availableVersions,
+    queue, queuePreview, sendNextQueuedLive,
   } = useStore();
 
   const handleGoLive = () => {
@@ -96,6 +97,24 @@ export default function Controls() {
         >
           <Square className="w-4 h-4" />
           <span>Clear</span>
+        </button>
+        <button
+          onClick={queuePreview}
+          disabled={!previewScripture}
+          className="flex items-center space-x-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white rounded-lg transition-colors font-medium text-sm"
+          title="Queue current preview"
+        >
+          <ListPlus className="w-4 h-4" />
+          <span>Queue</span>
+        </button>
+        <button
+          onClick={sendNextQueuedLive}
+          disabled={queue.length === 0 || isLiveFrozen}
+          className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white rounded-lg transition-colors font-medium text-sm"
+          title="Send next queued reference live"
+        >
+          <Send className="w-4 h-4" />
+          <span>Next Live</span>
         </button>
         <button 
           onClick={handleGoLive}

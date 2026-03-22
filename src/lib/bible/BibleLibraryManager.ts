@@ -31,6 +31,39 @@ export class BibleLibraryManager {
     return Array.from(this.bibles.keys());
   }
 
+  public getBooks(version?: string): BibleBook[] {
+    const targetVersion = (version || this.defaultVersion).toUpperCase();
+    const bible = this.bibles.get(targetVersion);
+    return bible ? [...bible.books] : [];
+  }
+
+  public getChapterCount(book: string, version?: string): number | null {
+    const targetVersion = (version || this.defaultVersion).toUpperCase();
+    const bible = this.bibles.get(targetVersion);
+    if (!bible) return null;
+
+    const key = book.toLowerCase().trim();
+    const found = bible.books.find((b) => b.name.toLowerCase() === key || b.id.toLowerCase() === key);
+    return found ? found.chapters : null;
+  }
+
+  public getLastVerseInChapter(book: string, chapter: number, version?: string): number | null {
+    const targetVersion = (version || this.defaultVersion).toUpperCase();
+    const bible = this.bibles.get(targetVersion);
+    if (!bible) return null;
+
+    const normalizedBook = book.toLowerCase().trim();
+    let maxVerse = 0;
+
+    for (const verse of Object.values(bible.verseIndex)) {
+      if (verse.book.toLowerCase() !== normalizedBook) continue;
+      if (verse.chapter !== chapter) continue;
+      if (verse.verse > maxVerse) maxVerse = verse.verse;
+    }
+
+    return maxVerse > 0 ? maxVerse : null;
+  }
+
   public getVerse(book: string, chapter: number, verse: number, version?: string): BibleVerse | null {
     const targetVersion = (version || this.defaultVersion).toUpperCase();
     const bible = this.bibles.get(targetVersion);

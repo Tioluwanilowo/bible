@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, screen, session, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import express, { Request, Response } from 'express';
 
 let mainWindow: BrowserWindow | null = null;
 const liveWindows = new Map<string, BrowserWindow>();
@@ -53,7 +55,10 @@ function loadWsClass(): { WS: any; error?: undefined } | { WS?: undefined; error
   }
 }
 
-const isDev = process.env.NODE_ENV === 'development';
+// Use Electron packaging state, not NODE_ENV.
+// This prevents installed EXEs from accidentally entering dev mode
+// if NODE_ENV=development exists in the system environment.
+const isDev = !app.isPackaged;
 
 /**
  * Returns the Vite dev server base URL.
@@ -75,7 +80,315 @@ function getDevServerUrl(): string {
 }
 
 // Resolved once at startup — all windows share the same dev server.
+
 const DEV_SERVER_URL = isDev ? getDevServerUrl() : '';
+
+type RemoteControlConfig = {
+  enabled: boolean;
+  port: number;
+  token: string;
+};
+
+type RemoteRuntimeState = {
+  mode: 'auto' | 'manual';
+  isAutoPaused: boolean;
+  isLiveFrozen: boolean;
+  previewReference: string;
+  liveReference: string;
+  queueCount: number;
+  updatedAt: number;
+};
+
+let remoteControlConfig: RemoteControlConfig = {
+  enabled: false,
+  port: 4217,
+  token: '',
+};
+let remoteControlApp: ReturnType<typeof express> | null = null;
+let remoteControlServer: import('http').Server | null = null;
+let remoteControlError: string | null = null;
+let remoteRuntimeState: RemoteRuntimeState = {
+  mode: 'manual',
+  isAutoPaused: false,
+  isLiveFrozen: false,
+  previewReference: '',
+  liveReference: '',
+  queueCount: 0,
+  updatedAt: Date.now(),
+};
+
+function getRemoteUrls(port: number): string[] {
+  const urls = new Set<string>();
+  urls.add(`http://localhost:${port}`);
+
+  const interfaces = os.networkInterfaces();
+  for (const iface of Object.values(interfaces)) {
+    if (!iface) continue;
+    for (const entry of iface) {
+      if (entry.family !== 'IPv4' || entry.internal) continue;
+      urls.add(`http://${entry.address}:${port}`);
+    }
+  }
+
+  return [...urls];
+}
+
+function parseRemoteToken(req: Request): string {
+  const headerToken = req.header('x-scriptureflow-token');
+  if (headerToken && typeof headerToken === 'string') return headerToken.trim();
+
+  const auth = req.header('authorization');
+  if (auth && auth.toLowerCase().startsWith('bearer ')) {
+    return auth.slice(7).trim();
+  }
+
+  const queryToken = req.query?.token;
+  if (typeof queryToken === 'string') return queryToken.trim();
+  return '';
+}
+
+function isRemoteAuthorized(req: Request): boolean {
+  if (!remoteControlConfig.token) return true;
+  const incoming = parseRemoteToken(req);
+  return incoming.length > 0 && incoming === remoteControlConfig.token;
+}
+
+function buildRemoteStatus() {
+  return {
+    running: Boolean(remoteControlServer),
+    enabled: remoteControlConfig.enabled,
+    port: remoteControlConfig.port,
+    tokenSet: Boolean(remoteControlConfig.token),
+    urls: getRemoteUrls(remoteControlConfig.port),
+    error: remoteControlError ?? undefined,
+    state: remoteRuntimeState,
+  };
+}
+
+function buildRemoteControlPage(): string {
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ScriptureFlow Remote</title>
+    <style>
+      body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: #0a0a0a; color: #f4f4f5; }
+      .wrap { max-width: 860px; margin: 0 auto; padding: 18px; }
+      .card { background: #121216; border: 1px solid #24242a; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      button { border: 0; border-radius: 8px; padding: 10px 12px; color: white; background: #3f3f46; cursor: pointer; }
+      button:hover { background: #52525b; }
+      .primary { background: #2563eb; }
+      .ok { background: #059669; }
+      .danger { background: #b91c1c; }
+      input { width: 100%; border-radius: 8px; border: 1px solid #27272a; background: #09090b; color: white; padding: 10px; box-sizing: border-box; margin-bottom: 8px; }
+      .muted { color: #a1a1aa; font-size: 12px; }
+      .title { font-size: 18px; font-weight: 700; margin: 0 0 8px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .state { display: grid; grid-template-columns: 130px 1fr; gap: 6px; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <p class="title">ScriptureFlow Remote</p>
+        <p class="muted">Control preview/live and queue from phone or laptop.</p>
+        <input id="token" placeholder="Access token (leave empty if remote has no token)" />
+      </div>
+      <div class="card">
+        <p class="title">Live Controls</p>
+        <div class="row">
+          <button class="ok" onclick="act('goLive')">Go Live</button>
+          <button class="danger" onclick="act('clearLive')">Clear Live</button>
+          <button onclick="act('nextVerse')">Next Verse</button>
+          <button onclick="act('prevVerse')">Previous Verse</button>
+        </div>
+      </div>
+      <div class="card">
+        <p class="title">Mode</p>
+        <div class="row">
+          <button onclick="act('setModeManual')">Manual</button>
+          <button onclick="act('setModeAuto')">Auto</button>
+          <button onclick="act('toggleAutoPause')">Pause / Resume Auto</button>
+        </div>
+      </div>
+      <div class="card">
+        <p class="title">Queue</p>
+        <div class="row">
+          <button class="primary" onclick="act('queuePreview')">Queue Current Preview</button>
+          <button class="ok" onclick="act('sendNextQueuedLive')">Send Next Queued Live</button>
+        </div>
+      </div>
+      <div class="card">
+        <p class="title">Direct Preview Lookup</p>
+        <input id="book" placeholder="Book (e.g. John)" />
+        <input id="chapter" placeholder="Chapter (e.g. 3)" />
+        <input id="verse" placeholder="Verse (e.g. 16)" />
+        <button class="primary" onclick="setPreviewRef()">Set Preview Reference</button>
+      </div>
+      <div class="card">
+        <p class="title">Current State</p>
+        <div id="state" class="state"></div>
+      </div>
+    </div>
+    <script>
+      function authHeaders() {
+        const token = document.getElementById('token').value.trim();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['x-scriptureflow-token'] = token;
+        return headers;
+      }
+      async function act(type, payload) {
+        await fetch('/api/action', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ type, payload: payload || {} }),
+        });
+        await refreshState();
+      }
+      async function setPreviewRef() {
+        const book = document.getElementById('book').value.trim();
+        const chapter = parseInt(document.getElementById('chapter').value.trim(), 10);
+        const verse = parseInt(document.getElementById('verse').value.trim(), 10);
+        if (!book || !Number.isFinite(chapter) || !Number.isFinite(verse)) return;
+        await act('setPreviewReference', { book, chapter, verse });
+      }
+      async function refreshState() {
+        const res = await fetch('/api/state', { headers: authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        const s = data.state || {};
+        document.getElementById('state').innerHTML =
+          '<div class=\"muted\">Mode</div><div>' + (s.mode || '-') + '</div>' +
+          '<div class=\"muted\">Auto Paused</div><div>' + (s.isAutoPaused ? 'Yes' : 'No') + '</div>' +
+          '<div class=\"muted\">Frozen</div><div>' + (s.isLiveFrozen ? 'Yes' : 'No') + '</div>' +
+          '<div class=\"muted\">Preview</div><div class=\"mono\">' + (s.previewReference || '-') + '</div>' +
+          '<div class=\"muted\">Live</div><div class=\"mono\">' + (s.liveReference || '-') + '</div>' +
+          '<div class=\"muted\">Queue</div><div>' + (s.queueCount ?? 0) + '</div>';
+      }
+      refreshState();
+      setInterval(refreshState, 1200);
+    </script>
+  </body>
+</html>`;
+}
+
+async function stopRemoteControlServer(): Promise<void> {
+  if (!remoteControlServer) return;
+  await new Promise<void>((resolve) => {
+    remoteControlServer?.close(() => resolve());
+  });
+  remoteControlServer = null;
+  remoteControlApp = null;
+}
+
+async function startRemoteControlServer(): Promise<void> {
+  if (remoteControlServer) return;
+
+  const appServer = express();
+  appServer.use(express.json({ limit: '32kb' }));
+
+  appServer.get('/api/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  appServer.get('/api/state', (req, res) => {
+    if (!isRemoteAuthorized(req)) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+    res.json({ ok: true, state: remoteRuntimeState, version: app.getVersion() });
+  });
+
+  appServer.post('/api/action', (req, res) => {
+    if (!isRemoteAuthorized(req)) {
+      res.status(401).json({ ok: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const type = String(req.body?.type || '').trim();
+    const payload = req.body?.payload ?? {};
+    const allowed = new Set([
+      'goLive',
+      'clearLive',
+      'nextVerse',
+      'prevVerse',
+      'queuePreview',
+      'sendNextQueuedLive',
+      'setPreviewReference',
+      'setModeAuto',
+      'setModeManual',
+      'toggleAutoPause',
+    ]);
+    if (!allowed.has(type)) {
+      res.status(400).json({ ok: false, error: 'Unknown action type' });
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      res.status(503).json({ ok: false, error: 'Main window unavailable' });
+      return;
+    }
+    mainWindow.webContents.send('remote-command', { type, payload });
+    res.json({ ok: true });
+  });
+
+  appServer.get('/', (req: Request, res: Response) => {
+    if (!isRemoteAuthorized(req)) {
+      res.status(401).send('Unauthorized');
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildRemoteControlPage());
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const server = appServer.listen(remoteControlConfig.port, '0.0.0.0', () => {
+      remoteControlServer = server;
+      remoteControlApp = appServer;
+      remoteControlError = null;
+      console.log(`[Remote] Listening on port ${remoteControlConfig.port}`);
+      resolve();
+    });
+    server.once('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+async function configureRemoteControl(nextConfig: Partial<RemoteControlConfig>) {
+  const normalized: RemoteControlConfig = {
+    enabled: Boolean(nextConfig.enabled),
+    port: Math.min(65535, Math.max(1024, Number(nextConfig.port) || 4217)),
+    token: String(nextConfig.token ?? '').trim(),
+  };
+  const changedPort = normalized.port !== remoteControlConfig.port;
+  const changedEnabled = normalized.enabled !== remoteControlConfig.enabled;
+  const changedToken = normalized.token !== remoteControlConfig.token;
+
+  remoteControlConfig = normalized;
+
+  try {
+    if (!normalized.enabled) {
+      await stopRemoteControlServer();
+      return { ok: true, ...buildRemoteStatus() };
+    }
+
+    if (!remoteControlServer || changedPort || changedEnabled) {
+      await stopRemoteControlServer();
+      await startRemoteControlServer();
+    } else if (changedToken) {
+      // Token is read dynamically per request; no restart required.
+    }
+
+    return { ok: true, ...buildRemoteStatus() };
+  } catch (err: any) {
+    remoteControlError = err?.message ?? String(err);
+    console.error(`[Remote] Failed to configure server: ${remoteControlError}`);
+    await stopRemoteControlServer();
+    return { ok: false, ...buildRemoteStatus() };
+  }
+}
 
 // ── NDI state ─────────────────────────────────────────────────────
 // NDI uses an offscreen BrowserWindow that renders scripture via live.html
@@ -498,6 +811,7 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     stopAllNDI(false);
+    void stopRemoteControlServer();
     closeRealtimeWs();
     closeDeepgramWs();
     liveWindows.forEach(win => { try { win.close(); } catch { /* ignore */ } });
@@ -749,6 +1063,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopAllNDI(false);
+  void stopRemoteControlServer();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -789,6 +1104,22 @@ ipcMain.handle('get-displays', () => {
     name: `Display ${d.id} (${d.bounds.width}x${d.bounds.height})`,
     isPrimary: d.id === screen.getPrimaryDisplay().id,
   }));
+});
+
+ipcMain.handle('remote-control-configure', async (_event, config: Partial<RemoteControlConfig>) => {
+  return configureRemoteControl(config);
+});
+
+ipcMain.handle('remote-control-status', () => {
+  return buildRemoteStatus();
+});
+
+ipcMain.on('remote-control-state-sync', (_event, payload: Partial<RemoteRuntimeState>) => {
+  remoteRuntimeState = {
+    ...remoteRuntimeState,
+    ...payload,
+    updatedAt: Date.now(),
+  };
 });
 
 ipcMain.on('open-live-window', (event, { windowId = 'main', displayId }: { windowId?: string; displayId?: string }) => {
@@ -838,9 +1169,27 @@ ipcMain.on('ndi-stop', (_event, payload?: { targetId?: string }) => {
 });
 
 ipcMain.on('open-external', (_event, url: string) => {
-  // Only allow https:// links to prevent abuse
-  if (typeof url === 'string' && url.startsWith('https://')) {
-    shell.openExternal(url);
+  if (typeof url !== 'string') return;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const isHttps = parsed.protocol === 'https:';
+    const isPrivate172 = /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+    const isLocalHttp =
+      parsed.protocol === 'http:' &&
+      (
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        isPrivate172
+      );
+
+    if (isHttps || isLocalHttp) {
+      shell.openExternal(parsed.toString());
+    }
+  } catch {
+    // ignore invalid URLs
   }
 });
 
@@ -1033,4 +1382,5 @@ function registerDeepgramHandlers(): void {
 
   console.log('[Main] Deepgram IPC handlers registered ✓');
 }
+
 

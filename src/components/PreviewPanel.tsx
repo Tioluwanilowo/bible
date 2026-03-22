@@ -1,9 +1,11 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
 import ManualSearch from './ManualSearch';
+import RunSheetPanel from './RunSheetPanel';
+import ProgramMonitorPanel from './ProgramMonitorPanel';
 
 export default function PreviewPanel() {
-  const { previewScripture, commands, mode, isAutoPaused } = useStore();
+  const { commands, mode, isAutoPaused } = useStore();
   const latestCommand = commands[0];
 
   return (
@@ -17,24 +19,17 @@ export default function PreviewPanel() {
           </div>
         )}
       </div>
-      
-      <div className="flex justify-center">
+
+      <div className="mb-4">
         <ManualSearch />
       </div>
 
-      <div className="flex-1 border border-zinc-800 rounded-2xl bg-zinc-900/50 flex items-center justify-center p-8 relative">
-        {previewScripture ? (
-          <div className="text-center max-w-2xl">
-            <p className="text-3xl font-serif mb-6 leading-relaxed">"{previewScripture.text}"</p>
-            <p className="text-xl text-zinc-400 font-medium">
-              {previewScripture.book} {previewScripture.chapter}:{previewScripture.verse}
-              {previewScripture.endVerse ? `-${previewScripture.endVerse}` : ''}
-              <span className="text-zinc-600 text-sm ml-2">{previewScripture.version}</span>
-            </p>
-          </div>
-        ) : (
-          <p className="text-zinc-600">Search for a scripture or wait for voice detection.</p>
-        )}
+      <div className="flex-1 min-h-0">
+        <ProgramMonitorPanel />
+      </div>
+
+      <div className="mt-4">
+        <RunSheetPanel />
       </div>
     </div>
   );

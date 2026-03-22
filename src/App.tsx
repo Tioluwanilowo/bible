@@ -9,6 +9,7 @@ import ThemeDesigner from './components/ThemeDesigner';
 import HotkeyManager from './components/HotkeyManager';
 import LiveOutputManager from './components/LiveOutputManager';
 import LiveStatusPanel from './components/LiveStatusPanel';
+import RemoteControlBridge from './components/RemoteControlBridge';
 import { useStore } from './store/useStore';
 import { loadDefaultBibles } from './lib/bibleEngine';
 import { bibleLibrary } from './lib/bible/BibleLibraryManager';
@@ -43,6 +44,7 @@ export default function App() {
     <div className="flex flex-col h-screen bg-zinc-950 text-zinc-100 font-sans">
       <HotkeyManager />
       <LiveOutputManager />
+      <RemoteControlBridge />
       <LiveStatusPanel />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />

@@ -1,6 +1,18 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { AppState, ListeningState, TranscriptionStatus, Theme, OutputTarget, DEFAULT_ELEMENTS, ConfirmedRef } from '../types';
+import {
+  AppState,
+  ListeningState,
+  TranscriptionStatus,
+  Theme,
+  OutputTarget,
+  DEFAULT_ELEMENTS,
+  ConfirmedRef,
+  Settings,
+  Scripture,
+  Command,
+  PastorVoiceProfile,
+} from '../types';
 import { getNextVerse, getPrevVerse, getScripture, searchVersesByContent } from '../lib/bibleEngine';
 import { interpretTranscript } from '../lib/commandInterpreter';
 import { executeCommand } from '../lib/commandExecutor';
@@ -65,6 +77,102 @@ function fastRefMatchesConfirmed(
   );
 }
 
+function normalizeBookName(book: string): string {
+  return book.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function sourceMentionsBook(sourceText: string, book: string): boolean {
+  const sourceLower = sourceText.toLowerCase();
+  const bookLower = book.toLowerCase();
+  if (sourceLower.includes(bookLower)) return true;
+
+  const compactSource = sourceLower.replace(/[^a-z0-9]/g, '');
+  if (compactSource.includes(normalizeBookName(book))) return true;
+
+  // Common alias symmetry: Psalm <-> Psalms
+  if ((bookLower === 'psalm' && /\bpsalms\b/.test(sourceLower)) || (bookLower === 'psalms' && /\bpsalm\b/.test(sourceLower))) {
+    return true;
+  }
+  return false;
+}
+
+const BOOK_KEYWORDS = Array.from(BIBLE_BOOKS).map((b) => b.toLowerCase());
+
+function hasScriptureIntentCue(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (!lower.trim()) return false;
+
+  if (/\b(?:next verse|previous verse|go back|continue(?: reading)?|carry on|move forward)\b/.test(lower)) {
+    return true;
+  }
+  if (/\b(?:chapter|verse|translation|version|niv|kjv|esv|nkjv|nasb|nlt)\b/.test(lower)) {
+    return true;
+  }
+  if (/\b\d{1,3}:\d{1,3}(?:-\d{1,3})?\b/.test(lower)) {
+    return true;
+  }
+  if (/\b\d{3,4}\b/.test(lower)) {
+    return true;
+  }
+
+  return BOOK_KEYWORDS.some((book) => lower.includes(book));
+}
+
+function isSameScriptureRef(a: Scripture | null | undefined, b: Scripture | null | undefined): boolean {
+  if (!a || !b) return false;
+  return (
+    normalizeBookName(a.book) === normalizeBookName(b.book) &&
+    a.chapter === b.chapter &&
+    a.verse === b.verse &&
+    (a.endVerse ?? null) === (b.endVerse ?? null)
+  );
+}
+
+function getAutoLiveGuardrailReason(
+  settings: Settings,
+  liveScripture: Scripture | null,
+  nextScripture: Scripture | null,
+  command: Command,
+): string | null {
+  if (!liveScripture || !nextScripture) return null;
+
+  const sameBook = normalizeBookName(liveScripture.book) === normalizeBookName(nextScripture.book);
+  const sameChapter = liveScripture.chapter === nextScripture.chapter;
+  const chapterDelta = Math.abs(nextScripture.chapter - liveScripture.chapter);
+
+  if (settings.enableConfidenceGuardrails) {
+    // Prevent surprise cross-book jumps unless the target book was explicitly spoken.
+    if (!sameBook && !sourceMentionsBook(command.sourceText ?? '', nextScripture.book)) {
+      return `book change to ${nextScripture.book} without explicit spoken book`;
+    }
+    // Large chapter jumps are often accidental mis-parses in live sermons.
+    if (sameBook && chapterDelta > 1) {
+      return `large chapter jump (${liveScripture.chapter} -> ${nextScripture.chapter})`;
+    }
+  }
+
+  if (settings.verseLockEnabled) {
+    if (!sameBook || !sameChapter) {
+      return `verse lock active (stays on ${liveScripture.book} ${liveScripture.chapter})`;
+    }
+
+    const liveStart = liveScripture.verse;
+    const liveEnd = liveScripture.endVerse ?? liveScripture.verse;
+    const nextStart = nextScripture.verse;
+    const nextEnd = nextScripture.endVerse ?? nextScripture.verse;
+
+    const isSameVerse = nextStart === liveStart && nextEnd === liveEnd;
+    const isSmartContinue = nextStart === (liveEnd + 1);
+    const isOneVerseBack = nextStart === (liveStart - 1) && nextEnd === (liveStart - 1);
+
+    if (!isSameVerse && !isSmartContinue && !isOneVerseBack) {
+      return `verse lock allows only adjacent verse moves (current ${liveStart}${liveScripture.endVerse ? `-${liveEnd}` : ''})`;
+    }
+  }
+
+  return null;
+}
+
 function makeDefaultTheme(name = 'Default Theme'): Theme {
   return {
     id: crypto.randomUUID(),
@@ -97,6 +205,54 @@ function makeDefaultTheme(name = 'Default Theme'): Theme {
   };
 }
 
+function makeVoiceProfileFromSettings(name: string, settings: Settings): PastorVoiceProfile {
+  return {
+    id: crypto.randomUUID(),
+    name,
+    highConfidenceThreshold: settings.highConfidenceThreshold,
+    mediumConfidenceThreshold: settings.mediumConfidenceThreshold,
+    enableConfidenceGuardrails: settings.enableConfidenceGuardrails,
+    verseLockEnabled: settings.verseLockEnabled,
+    aiCueGateEnabled: settings.aiCueGateEnabled,
+    suggestionCooldownMs: settings.suggestionCooldownMs,
+  };
+}
+
+function getDefaultVoiceProfiles(): PastorVoiceProfile[] {
+  return [
+    {
+      id: 'vp-balanced',
+      name: 'Balanced',
+      highConfidenceThreshold: 0.8,
+      mediumConfidenceThreshold: 0.6,
+      enableConfidenceGuardrails: true,
+      verseLockEnabled: false,
+      aiCueGateEnabled: true,
+      suggestionCooldownMs: 2500,
+    },
+    {
+      id: 'vp-fast-sermon',
+      name: 'Fast Sermon',
+      highConfidenceThreshold: 0.75,
+      mediumConfidenceThreshold: 0.55,
+      enableConfidenceGuardrails: true,
+      verseLockEnabled: false,
+      aiCueGateEnabled: true,
+      suggestionCooldownMs: 2000,
+    },
+    {
+      id: 'vp-conservative',
+      name: 'Conservative',
+      highConfidenceThreshold: 0.85,
+      mediumConfidenceThreshold: 0.7,
+      enableConfidenceGuardrails: true,
+      verseLockEnabled: true,
+      aiCueGateEnabled: true,
+      suggestionCooldownMs: 3500,
+    },
+  ];
+}
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -107,6 +263,8 @@ export const useStore = create<AppState>()(
       showThemeDesigner: false,
       themes: [] as Theme[],
       activeThemeId: null as string | null,
+      voiceProfiles: getDefaultVoiceProfiles(),
+      activeVoiceProfileId: 'vp-balanced',
       outputTargets: [{
         id: 'main',
         label: 'Main Output',
@@ -129,6 +287,15 @@ export const useStore = create<AppState>()(
         deepgramApiKey: '',
         highConfidenceThreshold: 0.8,
         mediumConfidenceThreshold: 0.6,
+        enableConfidenceGuardrails: true,
+        verseLockEnabled: false,
+        aiCueGateEnabled: true,
+        suggestionCooldownMs: 2500,
+        remoteControl: {
+          enabled: false,
+          port: 4217,
+          token: '',
+        },
         presentation: {
           theme: 'dark',
           layout: 'full-scripture',
@@ -168,6 +335,7 @@ export const useStore = create<AppState>()(
       commands: [],
       pendingCommands: [],
       suggestions: [],
+      queue: [],
       liveOutputState: {
         targetDisplayId: null,
         windowBounds: null,
@@ -248,6 +416,54 @@ export const useStore = create<AppState>()(
             }));
           }
         }
+      },
+      addVoiceProfileFromCurrent: (name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return '';
+        const profile = makeVoiceProfileFromSettings(trimmed, get().settings);
+        set((state) => ({
+          voiceProfiles: [...state.voiceProfiles, profile],
+          activeVoiceProfileId: profile.id,
+        }));
+        return profile.id;
+      },
+      updateVoiceProfileFromCurrent: (id) => {
+        set((state) => ({
+          voiceProfiles: state.voiceProfiles.map((profile) => {
+            if (profile.id !== id) return profile;
+            const merged = makeVoiceProfileFromSettings(profile.name, state.settings);
+            return { ...merged, id: profile.id, name: profile.name };
+          }),
+        }));
+      },
+      removeVoiceProfile: (id) => {
+        set((state) => {
+          const nextProfiles = state.voiceProfiles.filter((profile) => profile.id !== id);
+          const fallbackProfiles = nextProfiles.length > 0 ? nextProfiles : getDefaultVoiceProfiles();
+          const activeVoiceProfileId = state.activeVoiceProfileId === id
+            ? fallbackProfiles[0]?.id ?? null
+            : state.activeVoiceProfileId;
+          return {
+            voiceProfiles: fallbackProfiles,
+            activeVoiceProfileId,
+          };
+        });
+      },
+      setActiveVoiceProfile: (id) => {
+        const profile = get().voiceProfiles.find((p) => p.id === id);
+        if (!profile) return;
+        set((state) => ({
+          activeVoiceProfileId: id,
+          settings: {
+            ...state.settings,
+            highConfidenceThreshold: profile.highConfidenceThreshold,
+            mediumConfidenceThreshold: profile.mediumConfidenceThreshold,
+            enableConfidenceGuardrails: profile.enableConfidenceGuardrails,
+            verseLockEnabled: profile.verseLockEnabled,
+            aiCueGateEnabled: profile.aiCueGateEnabled,
+            suggestionCooldownMs: profile.suggestionCooldownMs,
+          },
+        }));
       },
       // ── Output target management ──
       addOutputTarget: () => {
@@ -548,7 +764,7 @@ export const useStore = create<AppState>()(
           transcriptBuffer: [...state.transcriptBuffer, transcript].slice(-6),
         }));
 
-        const { settings, version, transcriptBuffer, confirmedRef, pendingRef } = get();
+        const { settings, version, transcriptBuffer, confirmedRef, pendingRef, commands } = get();
 
         // ── Fast-path: explicit Book C:V detected by the normalizer ───────────
         // The scriptureNormalizer already converted "John ten ten" → "John 10:10"
@@ -584,16 +800,24 @@ export const useStore = create<AppState>()(
         // content words appear in this chunk, suggest that verse.
         // Results go to the SUGGEST tab for operator approval, not live display.
         {
-          const matches = searchVersesByContent(transcript.text, version);
-          for (const m of matches) {
-            const scripture = getScripture(m.book, m.chapter, m.verse, version);
-            if (scripture) {
-              const pct = Math.round(m.score * 100);
-              get().logActivity(
-                `🔍 Suggest: ${m.book} ${m.chapter}:${m.verse} (${pct}% match, ${m.matchCount} words)`,
-                'info',
-              );
-              get().addSuggestion(scripture, m.score);
+          const latestReferenceCommand = commands.find((c) => c.intent === 'OPEN_REFERENCE');
+          const inSuggestionCooldown = Boolean(
+            latestReferenceCommand &&
+            (Date.now() - latestReferenceCommand.timestamp) < settings.suggestionCooldownMs,
+          );
+
+          if (!inSuggestionCooldown) {
+            const matches = searchVersesByContent(transcript.text, version);
+            for (const m of matches) {
+              const scripture = getScripture(m.book, m.chapter, m.verse, version);
+              if (scripture) {
+                const pct = Math.round(m.score * 100);
+                get().logActivity(
+                  `Suggest: ${m.book} ${m.chapter}:${m.verse} (${pct}% match, ${m.matchCount} words)`,
+                  'info',
+                );
+                get().addSuggestion(scripture, m.score);
+              }
             }
           }
         }
@@ -604,6 +828,11 @@ export const useStore = create<AppState>()(
           // Single noise words like "um", "uh", "ah" are not worth an API call.
           if (transcript.text.trim().length < 4) return;
 
+          const hasPendingRef = Boolean(pendingRef?.book || pendingRef?.chapter || pendingRef?.verseStart);
+          if (settings.aiCueGateEnabled && !hasPendingRef && !hasScriptureIntentCue(transcript.text)) {
+            return;
+          }
+
           // Read the freshly updated buffer (includes this transcript)
           const buffer = [...transcriptBuffer, transcript].slice(-6);
           // Snapshot the Realtime generation counter at call-time.  If Realtime fires
@@ -611,7 +840,7 @@ export const useStore = create<AppState>()(
           // .then() handler will discard the stale batch result instead of overwriting
           // the correct Realtime navigation.
           const seqAtCallTime = get().realtimeCommandSeq;
-          get().logActivity(`🤖 AI listening: "${transcript.text.slice(0, 60)}${transcript.text.length > 60 ? '…' : ''}"`, 'info');
+          get().logActivity(`AI listening: "${transcript.text.slice(0, 60)}${transcript.text.length > 60 ? '...' : ''}"`, 'info');
           referenceStateEngine
             .process(buffer, confirmedRef, pendingRef, settings.chatgptApiKey, version)
             .then((result) => {
@@ -744,7 +973,7 @@ export const useStore = create<AppState>()(
       },
 
       processCommand: (command) => {
-        const { settings, previewScripture, version, isAutoPaused, isLiveFrozen, mode } = get();
+        const { settings, previewScripture, liveScripture, version, isAutoPaused, isLiveFrozen, mode } = get();
         set((state) => ({ commands: [command, ...state.commands].slice(0, 50) }));
         
         const result = executeCommand(command, previewScripture, version, settings);
@@ -762,8 +991,29 @@ export const useStore = create<AppState>()(
             set({ version: command.payload.version });
           }
 
-          if (result.requiresApproval) {
-            set((state) => ({ pendingCommands: [...state.pendingCommands, { ...command, payload: { ...command.payload, resultScripture: result.scripture } }] }));
+          const guardrailReason = result.canUpdateLive
+            ? getAutoLiveGuardrailReason(settings, liveScripture, result.scripture, command)
+            : null;
+          const forceApprovalByGuardrail = Boolean(guardrailReason);
+          const mustRequireApproval = result.requiresApproval || forceApprovalByGuardrail;
+
+          if (mustRequireApproval) {
+            if (forceApprovalByGuardrail && guardrailReason) {
+              get().logActivity(`🛡️ Guardrail held auto-live: ${guardrailReason}`, 'warning');
+            }
+            set((state) => ({
+              pendingCommands: [
+                ...state.pendingCommands,
+                {
+                  ...command,
+                  payload: {
+                    ...command.payload,
+                    resultScripture: result.scripture,
+                    ...(guardrailReason ? { guardrailReason } : {}),
+                  },
+                },
+              ],
+            }));
           } else if (result.canUpdateLive && mode === 'auto' && !isAutoPaused && !isLiveFrozen) {
             get().setLive(result.scripture);
           }
@@ -798,13 +1048,33 @@ export const useStore = create<AppState>()(
       // ── Realtime Suggestions ──────────────────────────────────────────────
 
       addSuggestion: (scripture, confidence) => {
-        set((state) => ({
-          suggestions: [
-            { id: crypto.randomUUID(), scripture, confidence, timestamp: Date.now() },
-            // Keep latest 10 only — older unactioned suggestions expire naturally
-            ...state.suggestions,
-          ].slice(0, 10),
-        }));
+        set((state) => {
+          if (isSameScriptureRef(state.previewScripture, scripture) || isSameScriptureRef(state.liveScripture, scripture)) {
+            return {};
+          }
+
+          const existing = state.suggestions.find((s) => isSameScriptureRef(s.scripture, scripture));
+          if (existing) {
+            return {
+              suggestions: state.suggestions.map((s) => {
+                if (s.id !== existing.id) return s;
+                return {
+                  ...s,
+                  confidence: Math.max(s.confidence, confidence),
+                  timestamp: Date.now(),
+                };
+              }),
+            };
+          }
+
+          return {
+            suggestions: [
+              { id: crypto.randomUUID(), scripture, confidence, timestamp: Date.now() },
+              // Keep latest 10 only - older unactioned suggestions expire naturally.
+              ...state.suggestions,
+            ].slice(0, 10),
+          };
+        });
       },
 
       approveSuggestion: (id) => {
@@ -818,6 +1088,62 @@ export const useStore = create<AppState>()(
 
       dismissSuggestion: (id) => {
         set((state) => ({ suggestions: state.suggestions.filter(s => s.id !== id) }));
+      },
+
+      queueScripture: (scripture) => {
+        set((state) => {
+          const duplicate = state.queue.some((q) => isSameScriptureRef(q.scripture, scripture));
+          if (duplicate) return {};
+
+          return {
+            queue: [
+              ...state.queue,
+              { id: crypto.randomUUID(), scripture, queuedAt: Date.now() },
+            ].slice(-30),
+          };
+        });
+      },
+
+      queuePreview: () => {
+        const scripture = get().previewScripture;
+        if (!scripture) return;
+        get().queueScripture(scripture);
+        const ref = `${scripture.book} ${scripture.chapter}:${scripture.verse}${scripture.endVerse ? `-${scripture.endVerse}` : ''}`;
+        get().logActivity(`Queued: ${ref}`, 'info');
+      },
+
+      removeQueuedReference: (id) => {
+        set((state) => ({ queue: state.queue.filter((q) => q.id !== id) }));
+      },
+
+      clearQueue: () => {
+        set({ queue: [] });
+      },
+
+      sendQueuedReference: (id) => {
+        const state = get();
+        if (state.isLiveFrozen) {
+          state.logActivity('Cannot send queued item: live output is frozen', 'warning');
+          return;
+        }
+        const idx = state.queue.findIndex((q) => q.id === id);
+        if (idx < 0) return;
+
+        const next = state.queue[idx];
+        const rest = state.queue.filter((q) => q.id !== id);
+        set({ queue: rest });
+
+        get().setPreview(next.scripture);
+        get().setLive(next.scripture);
+
+        const ref = `${next.scripture.book} ${next.scripture.chapter}:${next.scripture.verse}${next.scripture.endVerse ? `-${next.scripture.endVerse}` : ''}`;
+        get().logActivity(`Queue live: ${ref}`, 'success');
+      },
+
+      sendNextQueuedLive: () => {
+        const next = get().queue[0];
+        if (!next) return;
+        get().sendQueuedReference(next.id);
       },
 
       // Live Output Actions
@@ -899,6 +1225,9 @@ export const useStore = create<AppState>()(
         outputSettings: state.outputSettings,
         themes: state.themes,
         activeThemeId: state.activeThemeId,
+        voiceProfiles: state.voiceProfiles,
+        activeVoiceProfileId: state.activeVoiceProfileId,
+        queue: state.queue,
         // Persist targets but reset runtime windowOpen to false
         outputTargets: state.outputTargets.map(t => ({ ...t, windowOpen: false })),
       }),
@@ -915,6 +1244,11 @@ export const useStore = create<AppState>()(
             settings: theme.settings ? { ...theme.settings, verseQuotes: false } : theme.settings,
           })),
           activeThemeId: persistedState.activeThemeId || null,
+          voiceProfiles: Array.isArray(persistedState.voiceProfiles) && persistedState.voiceProfiles.length > 0
+            ? persistedState.voiceProfiles
+            : currentState.voiceProfiles,
+          activeVoiceProfileId: persistedState.activeVoiceProfileId || currentState.activeVoiceProfileId,
+          queue: Array.isArray(persistedState.queue) ? persistedState.queue : currentState.queue,
           outputTargets: persistedState.outputTargets?.length
             ? persistedState.outputTargets.map((t: any) => ({ ...t, windowOpen: false }))
             : currentState.outputTargets,
@@ -929,6 +1263,10 @@ export const useStore = create<AppState>()(
             hotkeys: {
               ...(currentState.settings?.hotkeys || {}),
               ...(persistedState.settings?.hotkeys || {})
+            },
+            remoteControl: {
+              ...(currentState.settings?.remoteControl || {}),
+              ...(persistedState.settings?.remoteControl || {}),
             }
           }
         };
@@ -936,3 +1274,4 @@ export const useStore = create<AppState>()(
     }
   )
 );
+

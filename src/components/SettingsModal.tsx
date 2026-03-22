@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   X, RefreshCw, Monitor, Mic, Tv, Cpu, Plus, Trash2,
-  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound,
+  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound, Smartphone, UserPlus, Save, Copy,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { AudioInputManager } from '../lib/audioManager';
@@ -12,26 +12,61 @@ interface SettingsModalProps {
 
 const LEGACY_NDI_TARGET_ID = '__legacy__';
 
+type NDIHealthSnapshot = {
+  status: 'active' | 'stopped' | 'unavailable' | 'error';
+  reason?: string;
+  error?: string;
+  sourceName?: string;
+  activeCount?: number;
+  checkedAt: number;
+};
+
+type RemoteControlStatus = {
+  running: boolean;
+  enabled: boolean;
+  port: number;
+  tokenSet: boolean;
+  urls: string[];
+  error?: string;
+  state?: {
+    mode?: 'auto' | 'manual';
+    isAutoPaused?: boolean;
+    isLiveFrozen?: boolean;
+    previewReference?: string;
+    liveReference?: string;
+    queueCount?: number;
+    updatedAt?: number;
+  };
+};
+
 export default function SettingsModal({ onClose }: SettingsModalProps) {
   const {
     settings, updateSettings, updatePresentationSettings,
     isMockMode, setIsMockMode, isListening, availableDisplays,
     outputSettings, providerStatuses, setOutputSettings, outputLogs,
     themes, outputTargets, addOutputTarget, addNDITarget, removeOutputTarget, updateOutputTarget,
+    voiceProfiles, activeVoiceProfileId, addVoiceProfileFromCurrent,
+    updateVoiceProfileFromCurrent, removeVoiceProfile, setActiveVoiceProfile,
   } = useStore();
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'audio' | 'presentation' | 'output' | 'routing'>('audio');
+  const [activeTab, setActiveTab] = useState<'audio' | 'presentation' | 'output' | 'remote' | 'routing'>('audio');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
   const [showChatGptKey, setShowChatGptKey] = useState(false);
   const [showDeepgramKey, setShowDeepgramKey] = useState(false);
+  const [showRemoteToken, setShowRemoteToken] = useState(false);
+  const [newVoiceProfileName, setNewVoiceProfileName] = useState('');
+  const [remoteStatus, setRemoteStatus] = useState<RemoteControlStatus | null>(null);
+  const [isRefreshingRemoteStatus, setIsRefreshingRemoteStatus] = useState(false);
+  const [copiedRemoteUrl, setCopiedRemoteUrl] = useState('');
 
   // NDI channel controls (Outputs & Display tab — per-target NDI)
   const [ndiActiveTargets, setNdiActiveTargets] = useState<Record<string, boolean>>({});
   const [ndiTargetWorking, setNdiTargetWorking] = useState<string | null>(null);
   const [ndiErrors, setNdiErrors] = useState<Record<string, string>>({});
+  const [ndiHealthByTarget, setNdiHealthByTarget] = useState<Record<string, NDIHealthSnapshot>>({});
 
   const loadDevices = async () => {
     setIsRefreshing(true);
@@ -40,7 +75,43 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     setIsRefreshing(false);
   };
 
+  const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === activeVoiceProfileId) ?? null;
+
+  const updateRemoteControl = (updates: Partial<typeof settings.remoteControl>) => {
+    updateSettings({
+      remoteControl: {
+        ...settings.remoteControl,
+        ...updates,
+      },
+    });
+  };
+
+  const refreshRemoteStatus = async () => {
+    if (!window.electronAPI?.remoteGetStatus) return;
+    setIsRefreshingRemoteStatus(true);
+    try {
+      const status = await window.electronAPI.remoteGetStatus();
+      setRemoteStatus(status as RemoteControlStatus);
+    } catch (err: any) {
+      const rawMessage = err?.message ?? 'Failed to fetch remote status';
+      const message = rawMessage.includes("No handler registered for 'remote-control-status'")
+        ? 'Remote backend is not loaded in this app instance yet. Restart ScriptureFlow once, then open this tab again.'
+        : rawMessage;
+      setRemoteStatus({
+        running: false,
+        enabled: settings.remoteControl.enabled,
+        port: settings.remoteControl.port,
+        tokenSet: Boolean(settings.remoteControl.token),
+        urls: [],
+        error: message,
+      });
+    } finally {
+      setIsRefreshingRemoteStatus(false);
+    }
+  };
+
   useEffect(() => { loadDevices(); }, []);
+  useEffect(() => { refreshRemoteStatus(); }, [settings.remoteControl]);
 
   const refreshDisplays = () => {
     window.electronAPI?.getDisplays().then(displays => {
@@ -52,26 +123,64 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     const ndiTargets = outputTargets.filter(t => t.type === 'ndi');
     if (ndiTargets.length === 0) {
       setNdiActiveTargets({});
+      setNdiHealthByTarget({});
       return;
     }
 
     let cancelled = false;
 
-    Promise.all(
-      ndiTargets.map(async (target) => {
-        try {
-          const status = await window.electronAPI?.ndiGetStatus?.(target.id);
-          return { targetId: target.id, active: status?.status === 'active' };
-        } catch {
-          return { targetId: target.id, active: false };
-        }
-      }),
-    ).then((rows) => {
+    const refreshNDIHealth = async () => {
+      const rows = await Promise.all(
+        ndiTargets.map(async (target) => {
+          try {
+            const status = await window.electronAPI?.ndiGetStatus?.(target.id);
+            return {
+              targetId: target.id,
+              status: (status?.status as NDIHealthSnapshot['status']) || 'stopped',
+              reason: status?.reason,
+              sourceName: status?.sourceName,
+              activeCount: status?.activeCount,
+              checkedAt: Date.now(),
+            };
+          } catch (err: any) {
+            return {
+              targetId: target.id,
+              status: 'error' as const,
+              reason: err?.message ?? 'Status check failed',
+              activeCount: 0,
+              checkedAt: Date.now(),
+            };
+          }
+        }),
+      );
+
       if (cancelled) return;
-      const next: Record<string, boolean> = {};
-      rows.forEach(row => { next[row.targetId] = row.active; });
-      setNdiActiveTargets(next);
-    });
+
+      const nextActive: Record<string, boolean> = {};
+      const nextHealth: Record<string, NDIHealthSnapshot> = {};
+      const nextErrors: Record<string, string> = {};
+
+      rows.forEach((row) => {
+        nextActive[row.targetId] = row.status === 'active';
+        nextHealth[row.targetId] = {
+          status: row.status,
+          reason: row.reason,
+          sourceName: row.sourceName,
+          activeCount: row.activeCount,
+          checkedAt: row.checkedAt,
+        };
+        if (row.status === 'error' || row.status === 'unavailable') {
+          if (row.reason) nextErrors[row.targetId] = row.reason;
+        }
+      });
+
+      setNdiActiveTargets(nextActive);
+      setNdiHealthByTarget(nextHealth);
+      setNdiErrors(prev => ({ ...prev, ...nextErrors }));
+    };
+
+    refreshNDIHealth();
+    const pollTimer = setInterval(refreshNDIHealth, 5000);
 
     const unsubscribe = window.electronAPI?.onNDIStatusChanged?.(({ targetId, status, error }) => {
       if (!targetId || targetId === LEGACY_NDI_TARGET_ID) return;
@@ -80,13 +189,27 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       } else if (status === 'stopped' || status === 'error') {
         setNdiActiveTargets(prev => ({ ...prev, [targetId]: false }));
       }
+      setNdiHealthByTarget(prev => ({
+        ...prev,
+        [targetId]: {
+          status: (status as NDIHealthSnapshot['status']) || 'stopped',
+          reason: error,
+          error,
+          sourceName: prev[targetId]?.sourceName,
+          activeCount: prev[targetId]?.activeCount,
+          checkedAt: Date.now(),
+        },
+      }));
       if (status === 'error' && error) {
         setNdiErrors(prev => ({ ...prev, [targetId]: error }));
+      } else if (status === 'active') {
+        setNdiErrors(prev => ({ ...prev, [targetId]: '' }));
       }
     });
 
     return () => {
       cancelled = true;
+      clearInterval(pollTimer);
       if (typeof unsubscribe === 'function') unsubscribe();
     };
   }, [outputTargets]);
@@ -108,6 +231,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
             { id: 'audio', label: 'Audio & Transcription', icon: Mic },
             { id: 'presentation', label: 'Outputs & Display', icon: Monitor },
             { id: 'output', label: 'Output Providers', icon: Tv },
+            { id: 'remote', label: 'Remote Control', icon: Smartphone },
             { id: 'routing', label: 'Hardware Routing', icon: Cpu },
           ] as const).map(({ id, label, icon: Icon }) => (
             <button
@@ -471,6 +595,172 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                   className="w-full accent-amber-500" />
                 <p className="text-xs text-zinc-500 mt-1">Commands between medium and high require manual approval.</p>
               </div>
+
+              <div className="pt-2 space-y-3">
+                <div className="flex items-center justify-between p-4 bg-zinc-950 rounded-lg border border-zinc-800">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">Confidence Guardrails</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Require manual approval for risky auto-live jumps (cross-book without explicit mention, large chapter jumps).
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={settings.enableConfidenceGuardrails}
+                      onChange={(e) => updateSettings({ enableConfidenceGuardrails: e.target.checked })}
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600" />
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between p-4 bg-zinc-950 rounded-lg border border-zinc-800">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">Verse Lock + Smart Continue</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Keep auto-live on current chapter and only allow adjacent verse moves automatically.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={settings.verseLockEnabled}
+                      onChange={(e) => updateSettings({ verseLockEnabled: e.target.checked })}
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600" />
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between p-4 bg-zinc-950 rounded-lg border border-zinc-800">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">AI Cue Gate</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Skip AI calls when a chunk has no scripture cue (fewer false triggers, lower latency).
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={settings.aiCueGateEnabled}
+                      onChange={(e) => updateSettings({ aiCueGateEnabled: e.target.checked })}
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600" />
+                  </label>
+                </div>
+
+                <div className="p-4 bg-zinc-950 rounded-lg border border-zinc-800">
+                  <div className="flex justify-between mb-2">
+                    <label className="text-sm font-medium text-zinc-400">Suggestion Cooldown</label>
+                    <span className="text-sm text-emerald-400">{(settings.suggestionCooldownMs / 1000).toFixed(1)}s</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="500"
+                    max="6000"
+                    step="250"
+                    value={settings.suggestionCooldownMs}
+                    onChange={(e) => updateSettings({ suggestionCooldownMs: parseInt(e.target.value, 10) })}
+                    className="w-full accent-emerald-500"
+                  />
+                  <p className="text-xs text-zinc-500 mt-1">
+                    Wait this long after an explicit reference before content-based suggestions can fire.
+                  </p>
+                </div>
+
+                <div className="p-4 bg-zinc-950 rounded-lg border border-zinc-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-medium text-white">Pastor Voice Profiles</h3>
+                      <p className="text-xs text-zinc-500 mt-1">
+                        Save and switch detection tuning presets for different speaking styles.
+                      </p>
+                    </div>
+                    <span className="text-[10px] px-2 py-1 rounded bg-indigo-500/10 text-indigo-300">
+                      {voiceProfiles.length} profiles
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Active Profile</label>
+                    <select
+                      value={activeVoiceProfileId ?? ''}
+                      onChange={(e) => setActiveVoiceProfile(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                    >
+                      {voiceProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => {
+                        if (!activeVoiceProfileId) return;
+                        updateVoiceProfileFromCurrent(activeVoiceProfileId);
+                      }}
+                      disabled={!activeVoiceProfileId}
+                      className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      Update
+                    </button>
+                    <button
+                      onClick={() => {
+                        const name = newVoiceProfileName.trim();
+                        if (!name) return;
+                        addVoiceProfileFromCurrent(name);
+                        setNewVoiceProfileName('');
+                      }}
+                      disabled={!newVoiceProfileName.trim()}
+                      className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      Save New
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!activeVoiceProfileId || voiceProfiles.length <= 1) return;
+                        removeVoiceProfile(activeVoiceProfileId);
+                      }}
+                      disabled={!activeVoiceProfileId || voiceProfiles.length <= 1}
+                      className="px-3 py-2 text-xs rounded-lg border border-red-900/60 text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Delete
+                    </button>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={newVoiceProfileName}
+                    onChange={(e) => setNewVoiceProfileName(e.target.value)}
+                    placeholder="New profile name (e.g. Sunday Main Service)"
+                    className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                  />
+
+                  {activeVoiceProfile && (
+                    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 text-[11px] text-zinc-400 grid grid-cols-2 gap-y-1">
+                      <span>High / Medium</span>
+                      <span className="text-zinc-200 text-right">
+                        {(activeVoiceProfile.highConfidenceThreshold * 100).toFixed(0)}% / {(activeVoiceProfile.mediumConfidenceThreshold * 100).toFixed(0)}%
+                      </span>
+                      <span>Guardrails</span>
+                      <span className="text-zinc-200 text-right">{activeVoiceProfile.enableConfidenceGuardrails ? 'On' : 'Off'}</span>
+                      <span>Verse Lock</span>
+                      <span className="text-zinc-200 text-right">{activeVoiceProfile.verseLockEnabled ? 'On' : 'Off'}</span>
+                      <span>AI Cue Gate</span>
+                      <span className="text-zinc-200 text-right">{activeVoiceProfile.aiCueGateEnabled ? 'On' : 'Off'}</span>
+                      <span>Suggestion Cooldown</span>
+                      <span className="text-zinc-200 text-right">{(activeVoiceProfile.suggestionCooldownMs / 1000).toFixed(1)}s</span>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -494,6 +784,11 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                   const resolvedTheme = themes.find(t => t.id === target.themeId);
                   const isNDI = target.type === 'ndi';
                   const ndiStreaming = Boolean(ndiActiveTargets[target.id]);
+                  const ndiHealth = ndiHealthByTarget[target.id];
+                  const ndiStatus = ndiHealth?.status ?? (ndiStreaming ? 'active' : 'stopped');
+                  const ndiLastChecked = ndiHealth?.checkedAt
+                    ? new Date(ndiHealth.checkedAt).toLocaleTimeString()
+                    : 'Pending';
 
                   return (
                     <div key={target.id} className={`rounded-xl border p-4 space-y-3 transition-colors ${target.enabled ? (isNDI ? 'bg-zinc-950 border-emerald-900/40' : 'bg-zinc-950 border-zinc-700') : 'bg-zinc-900/50 border-zinc-800 opacity-60'}`}>
@@ -603,9 +898,45 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
                       {/* NDI info note */}
                       {isNDI && (
-                        <p className="text-[10px] text-zinc-500 leading-relaxed">
-                          NDI renders scripture into a hidden offscreen window and streams it directly — no visible window needed.
-                        </p>
+                        <div className="space-y-2">
+                          <p className="text-[10px] text-zinc-500 leading-relaxed">
+                            NDI renders scripture into a hidden offscreen window and streams it directly - no visible window needed.
+                          </p>
+                          <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-2.5">
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-[10px] font-medium text-zinc-300">NDI Health Monitor</p>
+                              <span
+                                className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${
+                                  ndiStatus === 'active'
+                                    ? 'bg-emerald-500/15 text-emerald-400'
+                                    : ndiStatus === 'unavailable' || ndiStatus === 'error'
+                                      ? 'bg-red-500/15 text-red-400'
+                                      : 'bg-zinc-800 text-zinc-400'
+                                }`}
+                              >
+                                {ndiStatus}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-[10px]">
+                              <p className="text-zinc-500">Active Sources</p>
+                              <p className="text-zinc-300 text-right">{ndiHealth?.activeCount ?? (ndiStreaming ? 1 : 0)}</p>
+                              <p className="text-zinc-500">Runtime Source</p>
+                              <p
+                                className="text-zinc-300 text-right truncate"
+                                title={ndiHealth?.sourceName || target.ndiSourceName || 'ScriptureFlow'}
+                              >
+                                {ndiHealth?.sourceName || target.ndiSourceName || 'ScriptureFlow'}
+                              </p>
+                              <p className="text-zinc-500">Last Check</p>
+                              <p className="text-zinc-300 text-right">{ndiLastChecked}</p>
+                            </div>
+                            {(ndiHealth?.reason || ndiErrors[target.id]) && (
+                              <p className="text-[10px] text-amber-400 mt-2 break-all">
+                                {ndiHealth?.reason || ndiErrors[target.id]}
+                              </p>
+                            )}
+                          </div>
+                        </div>
                       )}
 
                       {/* Row 3: control buttons */}
@@ -829,6 +1160,152 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           )}
 
           {/* ── Hardware Routing ──────────────────────────────────── */}
+          {activeTab === 'remote' && (
+            <div className="space-y-6">
+              <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-5 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2">
+                    <Smartphone className="w-4 h-4 text-indigo-400 mt-0.5 shrink-0" />
+                    <div>
+                      <h4 className="text-sm font-medium text-white">Operator Remote App</h4>
+                      <p className="text-xs text-zinc-500 mt-1">
+                        Control preview/live, verse step, mode and queue from any phone or laptop on your local network.
+                      </p>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={settings.remoteControl.enabled}
+                      onChange={(e) => updateRemoteControl({ enabled: e.target.checked })}
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 rounded-full peer peer-checked:bg-indigo-600 relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5" />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Remote Port</label>
+                    <input
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      value={settings.remoteControl.port}
+                      onChange={(e) => {
+                        const parsed = Number(e.target.value);
+                        const nextPort = Number.isFinite(parsed) ? Math.min(65535, Math.max(1024, parsed)) : 4217;
+                        updateRemoteControl({ port: nextPort });
+                      }}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Access Token (optional)</label>
+                    <div className="relative">
+                      <input
+                        type={showRemoteToken ? 'text' : 'password'}
+                        value={settings.remoteControl.token}
+                        onChange={(e) => updateRemoteControl({ token: e.target.value })}
+                        placeholder="Set token for secure remote access"
+                        className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 pr-10 focus:outline-none focus:border-indigo-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowRemoteToken((v) => !v)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
+                        tabIndex={-1}
+                      >
+                        {showRemoteToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs">
+                  <button
+                    onClick={() => refreshRemoteStatus()}
+                    disabled={isRefreshingRemoteStatus}
+                    className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors disabled:opacity-50 inline-flex items-center gap-1"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingRemoteStatus ? 'animate-spin' : ''}`} />
+                    Refresh Status
+                  </button>
+                  <span className={`px-2 py-1 rounded ${
+                    remoteStatus?.running
+                      ? 'bg-emerald-500/15 text-emerald-400'
+                      : 'bg-zinc-800 text-zinc-400'
+                  }`}>
+                    {remoteStatus?.running ? 'Running' : 'Stopped'}
+                  </span>
+                  {remoteStatus?.state?.mode && (
+                    <span className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 uppercase">
+                      Mode: {remoteStatus.state.mode}
+                    </span>
+                  )}
+                </div>
+
+                {remoteStatus?.error && (
+                  <p className="text-[11px] text-red-400 break-all">{remoteStatus.error}</p>
+                )}
+
+                {remoteStatus?.state && (
+                  <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 grid grid-cols-2 gap-y-1 text-[11px]">
+                    <span className="text-zinc-500">Preview</span>
+                    <span className="text-zinc-200 text-right truncate" title={remoteStatus.state.previewReference || '-'}>
+                      {remoteStatus.state.previewReference || '-'}
+                    </span>
+                    <span className="text-zinc-500">Live</span>
+                    <span className="text-zinc-200 text-right truncate" title={remoteStatus.state.liveReference || '-'}>
+                      {remoteStatus.state.liveReference || '-'}
+                    </span>
+                    <span className="text-zinc-500">Queue Count</span>
+                    <span className="text-zinc-200 text-right">{remoteStatus.state.queueCount ?? 0}</span>
+                    <span className="text-zinc-500">Auto Paused</span>
+                    <span className="text-zinc-200 text-right">{remoteStatus.state.isAutoPaused ? 'Yes' : 'No'}</span>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  {(remoteStatus?.urls ?? []).map((url) => (
+                    <div key={url} className="flex items-center gap-2">
+                      <button
+                        onClick={() => window.electronAPI?.openExternal?.(url)}
+                        className="flex-1 text-left text-[11px] bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1.5 text-indigo-300 hover:text-indigo-200 hover:border-indigo-500 transition-colors truncate"
+                        title={`Open ${url} in browser`}
+                      >
+                        {url}
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(url);
+                            setCopiedRemoteUrl(url);
+                            setTimeout(() => setCopiedRemoteUrl(''), 1200);
+                          } catch {
+                            // ignore clipboard permission failures
+                          }
+                        }}
+                        className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+                        title="Copy URL"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                {copiedRemoteUrl && (
+                  <p className="text-[10px] text-emerald-400">Copied: {copiedRemoteUrl}</p>
+                )}
+
+                <p className="text-[10px] text-zinc-500">
+                  Open a URL from another device on the same Wi-Fi. Use the same token there if token auth is enabled.
+                </p>
+              </div>
+            </div>
+          )}
+
           {activeTab === 'routing' && (
             <div className="space-y-6">
 
@@ -897,3 +1374,4 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     </div>
   );
 }
+

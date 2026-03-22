@@ -39,6 +39,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('displays-changed', (_event, displays) => callback(displays));
   },
 
+  remoteConfigure: (config: { enabled: boolean; port: number; token: string }) =>
+    ipcRenderer.invoke('remote-control-configure', config),
+  remoteGetStatus: () => ipcRenderer.invoke('remote-control-status'),
+  remoteStateSync: (payload: {
+    mode: 'auto' | 'manual';
+    isAutoPaused: boolean;
+    isLiveFrozen: boolean;
+    previewReference: string;
+    liveReference: string;
+    queueCount: number;
+  }) => ipcRenderer.send('remote-control-state-sync', payload),
+  onRemoteCommand: (callback: (payload: { type: string; payload?: any }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { type: string; payload?: any }) => callback(payload);
+    ipcRenderer.on('remote-command', listener);
+    return () => ipcRenderer.removeListener('remote-command', listener);
+  },
+
   // ── NDI ─────────────────────────────────────────────────────────
   /** Start NDI output. Renders into an offscreen window and sends paint frames as NDI stream. */
   ndiStart: (sourceName: string, targetId?: string): Promise<{ ok: boolean; error?: string; targetId?: string }> =>
@@ -143,3 +160,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('deepgram-error', (_event, message) => callback(message));
   },
 });
+

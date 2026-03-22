@@ -33,6 +33,18 @@ export function getScripture(book: string, chapter: number, verse: number, versi
   }, version);
 }
 
+export function getBookNames(version?: string): string[] {
+  return bibleLibrary.getBooks(version).map((b) => b.name);
+}
+
+export function getChapterCount(book: string, version?: string): number | null {
+  return bibleLibrary.getChapterCount(book, version);
+}
+
+export function getLastVerseInChapter(book: string, chapter: number, version?: string): number | null {
+  return bibleLibrary.getLastVerseInChapter(book, chapter, version);
+}
+
 export function getNextVerse(current: Scripture): Scripture | null {
   const nextV = current.endVerse ? current.endVerse + 1 : current.verse + 1;
   return getScripture(current.book, current.chapter, nextV, current.version);

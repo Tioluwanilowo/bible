@@ -57,6 +57,29 @@ export interface SuggestedVerse {
   timestamp: number;
 }
 
+export interface QueuedReference {
+  id: string;
+  scripture: Scripture;
+  queuedAt: number;
+}
+
+export interface PastorVoiceProfile {
+  id: string;
+  name: string;
+  highConfidenceThreshold: number;
+  mediumConfidenceThreshold: number;
+  enableConfidenceGuardrails: boolean;
+  verseLockEnabled: boolean;
+  aiCueGateEnabled: boolean;
+  suggestionCooldownMs: number;
+}
+
+export interface RemoteControlSettings {
+  enabled: boolean;
+  port: number;
+  token: string;
+}
+
 export type ListeningState = 'idle' | 'initializing' | 'listening' | 'error' | 'stopped';
 export type TranscriptionStatus = 'ready' | 'active' | 'unavailable' | 'error';
 
@@ -84,6 +107,16 @@ export interface Settings {
   deepgramApiKey: string;
   highConfidenceThreshold: number;
   mediumConfidenceThreshold: number;
+  /** Extra safety checks before auto-live updates are applied. */
+  enableConfidenceGuardrails: boolean;
+  /** Keep auto-live locked to same chapter with adjacent-verse continuation only. */
+  verseLockEnabled: boolean;
+  /** Skip AI intent calls when transcript has no scripture/navigation cue. */
+  aiCueGateEnabled: boolean;
+  /** Hold suggestions briefly after an explicit reference to reduce false jumps. */
+  suggestionCooldownMs: number;
+  /** Built-in local network remote control server configuration. */
+  remoteControl: RemoteControlSettings;
   presentation: PresentationSettings;
   targetDisplayId: string | null;
   hotkeys: Record<string, HotkeyConfig>;
@@ -243,6 +276,8 @@ export interface AppState {
   toggleThemeDesigner: () => void;
   themes: Theme[];
   activeThemeId: string | null;
+  voiceProfiles: PastorVoiceProfile[];
+  activeVoiceProfileId: string | null;
 
   // ── AI Reference State ────────────────────────────────────────────────────
   /** Rolling buffer of the last N final transcript chunks fed to the AI. */
@@ -256,6 +291,10 @@ export interface AppState {
   updateTheme: (id: string, updates: Partial<Pick<Theme, 'name' | 'settings' | 'elements'>>) => void;
   deleteTheme: (id: string) => void;
   setActiveTheme: (id: string | null) => void;
+  addVoiceProfileFromCurrent: (name: string) => string;
+  updateVoiceProfileFromCurrent: (id: string) => void;
+  removeVoiceProfile: (id: string) => void;
+  setActiveVoiceProfile: (id: string) => void;
   // Output targets (multi-display / multi-window)
   outputTargets: OutputTarget[];
   addOutputTarget: () => string;
@@ -281,6 +320,7 @@ export interface AppState {
   commands: Command[];
   pendingCommands: Command[];
   suggestions: SuggestedVerse[];
+  queue: QueuedReference[];
   liveOutputState: LiveOutputState;
   availableDisplays: DisplayInfo[];
   
@@ -321,6 +361,12 @@ export interface AppState {
   addSuggestion: (scripture: Scripture, confidence: number) => void;
   approveSuggestion: (id: string) => void;
   dismissSuggestion: (id: string) => void;
+  queueScripture: (scripture: Scripture) => void;
+  queuePreview: () => void;
+  removeQueuedReference: (id: string) => void;
+  clearQueue: () => void;
+  sendNextQueuedLive: () => void;
+  sendQueuedReference: (id: string) => void;
 
   // Live Output Actions
   setLiveOutputState: (state: Partial<LiveOutputState>) => void;

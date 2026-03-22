@@ -20,7 +20,7 @@
 import type { Transcript, Command, ConfirmedRef, PendingRef } from '../../types';
 import type { AIResponse, InterpretResult } from './types';
 import { chatGPTInterpreter } from './ChatGPTInterpreter';
-import { getScripture, getLastVerseOfChapter, inferVerseFromText } from '../bibleEngine';
+import { getScripture, getLastVerseOfChapter, inferVerseFromText, parseReference } from '../bibleEngine';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -134,7 +134,7 @@ export class ReferenceStateEngine {
 
     switch (ai.command) {
       case 'set_reference':
-        return this.resolveSetReference(ai, confirmed, pending, version, sourceText);
+        return this.resolveSetReference(ai, confirmed, pending, version, sourceText, latestText);
 
       case 'jump_to_verse':
         if (!this.hasRelativeNavigationCue(latestText, ai.command)) return {};
@@ -240,7 +240,16 @@ export class ReferenceStateEngine {
     pending:    PendingRef   | null,
     version:    string,
     sourceText: string,
+    latestText: string,
   ): InterpretResult {
+    const hasPendingContext = Boolean(pending?.book || pending?.chapter || pending?.verseStart);
+    const hasCue = this.hasExplicitReferenceCue(latestText);
+    if (!hasPendingContext && !hasCue) {
+      // Ignore hallucinated set_reference outputs that are not backed by
+      // any explicit scripture cue in the most recent transcript chunk.
+      return {};
+    }
+
     // Anti-hallucination: if the AI returned a book that doesn't appear in the
     // spoken text, it likely hallucinated from training data. Fall back to the
     // confirmed/pending book instead of blindly trusting the AI-supplied book.
@@ -384,6 +393,17 @@ export class ReferenceStateEngine {
       updatedAt: Date.now(),
     };
     return { pendingRef: partialPending };
+  }
+
+  private hasExplicitReferenceCue(text: string): boolean {
+    const lower = text.toLowerCase();
+    if (!lower.trim()) return false;
+    if (/\b\d{1,3}:\d{1,3}(?:-\d{1,3})?\b/.test(lower)) return true;
+    if (/\b(?:chapter|verse)\b/.test(lower)) return true;
+    if (/\b(?:next verse|previous verse|go to verse|skip to verse|continue reading)\b/.test(lower)) {
+      return true;
+    }
+    return Boolean(parseReference(text));
   }
 
   // ── jump_to_verse ─────────────────────────────────────────────────────────

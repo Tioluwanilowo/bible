@@ -14,7 +14,17 @@ declare global {
       onLiveWindowStatusChanged: (callback: (payload: { windowId: string; status: string }) => void) => void;
       onLiveWindowBoundsChanged: (callback: (payload: { windowId: string; bounds: any }) => void) => void;
       onDisplaysChanged: (callback: (displays: any[]) => void) => void;
-
+      remoteConfigure: (config: { enabled: boolean; port: number; token: string }) => Promise<any>;
+      remoteGetStatus: () => Promise<any>;
+      remoteStateSync: (payload: {
+        mode: 'auto' | 'manual';
+        isAutoPaused: boolean;
+        isLiveFrozen: boolean;
+        previewReference: string;
+        liveReference: string;
+        queueCount: number;
+      }) => void;
+      onRemoteCommand: (callback: (payload: { type: string; payload?: any }) => void) => (() => void) | void;
       // NDI — offscreen renderer approach; no windowId needed
       ndiStart: (sourceName: string, targetId?: string) => Promise<{ ok: boolean; error?: string; targetId?: string }>;
       ndiStop: (targetId?: string) => void;
@@ -26,3 +36,4 @@ declare global {
     };
   }
 }
+
