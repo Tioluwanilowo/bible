@@ -10,6 +10,7 @@ import HotkeyManager from './components/HotkeyManager';
 import LiveOutputManager from './components/LiveOutputManager';
 import LiveStatusPanel from './components/LiveStatusPanel';
 import RemoteControlBridge from './components/RemoteControlBridge';
+import FirstRunWizard from './components/FirstRunWizard';
 import { useStore } from './store/useStore';
 import { loadDefaultBibles } from './lib/bibleEngine';
 import { bibleLibrary } from './lib/bible/BibleLibraryManager';
@@ -46,6 +47,7 @@ export default function App() {
       <LiveOutputManager />
       <RemoteControlBridge />
       <LiveStatusPanel />
+      <FirstRunWizard />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <PreviewPanel />

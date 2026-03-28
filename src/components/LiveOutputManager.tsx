@@ -136,6 +136,7 @@ export default function LiveOutputManager() {
     if (primaryTarget) {
       const resolvedTheme = themes.find(t => t.id === (primaryTarget.themeId ?? activeThemeId));
       const ps = resolvedTheme?.settings ?? settings.presentation;
+      const elements = resolvedTheme?.elements;
       const primaryPayload = {
         id: crypto.randomUUID(),
         timestamp: Date.now(),
@@ -143,13 +144,14 @@ export default function LiveOutputManager() {
         content,
         presentation: {
           theme: ps?.theme as any || 'dark',
-          layout: ps?.layout as any || 'full-scripture',
+          layout: (elements ? 'custom' : ps?.layout) as any || 'full-scripture',
           broadcastSafe: ps?.broadcastSafe ?? false,
         },
         visibility: {
           reference: ps?.referenceVisible ?? true,
           version: ps?.versionVisible ?? true,
         },
+        ...(elements ? { elements } : {}),
       };
       outputManager.updateAll(primaryPayload as any);
     }

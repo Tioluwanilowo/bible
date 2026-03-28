@@ -12,6 +12,7 @@ import {
   Scripture,
   Command,
   PastorVoiceProfile,
+  AppUserProfile,
 } from '../types';
 import { getNextVerse, getPrevVerse, getScripture, searchVersesByContent } from '../lib/bibleEngine';
 import { interpretTranscript } from '../lib/commandInterpreter';
@@ -173,6 +174,38 @@ function getAutoLiveGuardrailReason(
   return null;
 }
 
+function cloneDefaultElements(): Theme['elements'] {
+  return {
+    scripture: { ...DEFAULT_ELEMENTS.scripture },
+    reference: { ...DEFAULT_ELEMENTS.reference },
+    boxes: [],
+  };
+}
+
+function normalizeThemeElements(elements: any): Theme['elements'] {
+  const defaults = cloneDefaultElements();
+  const source = elements ?? {};
+  const boxes = Array.isArray(source.boxes) ? source.boxes : [];
+
+  return {
+    scripture: { ...defaults.scripture, ...(source.scripture || {}) },
+    reference: { ...defaults.reference, ...(source.reference || {}) },
+    boxes: boxes.map((box: any, index: number) => ({
+      id: typeof box?.id === 'string' && box.id.trim() ? box.id : crypto.randomUUID(),
+      x: typeof box?.x === 'number' ? box.x : 10 + index * 2,
+      y: typeof box?.y === 'number' ? box.y : 10 + index * 2,
+      width: typeof box?.width === 'number' ? box.width : 30,
+      height: typeof box?.height === 'number' ? box.height : 20,
+      visible: box?.visible !== false,
+      zIndex: typeof box?.zIndex === 'number' ? box.zIndex : 10 + index,
+      fillColor: typeof box?.fillColor === 'string' ? box.fillColor : '#000000',
+      fillOpacity: typeof box?.fillOpacity === 'number' ? box.fillOpacity : 40,
+      borderRadius: typeof box?.borderRadius === 'number' ? box.borderRadius : 0,
+      imageUrl: typeof box?.imageUrl === 'string' ? box.imageUrl : '',
+    })),
+  };
+}
+
 function makeDefaultTheme(name = 'Default Theme'): Theme {
   return {
     id: crypto.randomUUID(),
@@ -196,10 +229,7 @@ function makeDefaultTheme(name = 'Default Theme'): Theme {
       textShadow: false,
       verseQuotes: false,
     },
-    elements: {
-      scripture: { x: 5, y: 28, width: 90, visible: true, autoWidth: false, fontSize: 64 },
-      reference: { x: 20, y: 72, width: 60, visible: true, autoWidth: false, fontSize: 32 },
-    },
+    elements: cloneDefaultElements(),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -253,6 +283,126 @@ function getDefaultVoiceProfiles(): PastorVoiceProfile[] {
   ];
 }
 
+const DEFAULT_RUNSHEET_AUTO = {
+  enabled: false,
+  intervalSec: 15,
+};
+
+const DEFAULT_TRANSITION_SETTINGS = {
+  style: 'cut' as const,
+  durationMs: 600,
+  stingerLabel: 'Default Stinger',
+};
+
+const DEFAULT_OUTPUT_TARGETS: OutputTarget[] = [{
+  id: 'main',
+  label: 'Main Output',
+  type: 'window',
+  displayId: null,
+  themeId: null,
+  enabled: true,
+  windowOpen: false,
+}];
+
+const DEFAULT_SETTINGS: Settings = {
+  deviceId: 'default',
+  providerId: 'browser',
+  openaiApiKey: '',
+  googleSttApiKey: '',
+  chatgptApiKey: '',
+  deepgramApiKey: '',
+  highConfidenceThreshold: 0.8,
+  mediumConfidenceThreshold: 0.6,
+  enableConfidenceGuardrails: true,
+  verseLockEnabled: false,
+  aiCueGateEnabled: true,
+  suggestionCooldownMs: 2500,
+  remoteControl: {
+    enabled: false,
+    port: 4217,
+    token: '',
+  },
+  presentation: {
+    theme: 'dark',
+    layout: 'full-scripture',
+    fontFamily: 'serif',
+    fontScale: 1,
+    textAlignment: 'center',
+    padding: 48,
+    referenceVisible: true,
+    versionVisible: true,
+    backgroundStyle: 'solid',
+    lowerThirdPosition: 'bottom-center',
+    broadcastSafe: false,
+    backgroundColor: '',
+    backgroundOpacity: 100,
+    textColor: '',
+    referenceColor: '',
+    textShadow: false,
+    verseQuotes: false,
+  },
+  targetDisplayId: null,
+  hotkeys: {
+    nextVerse: { key: 'ArrowRight', modifiers: [], action: 'nextVerse' },
+    prevVerse: { key: 'ArrowLeft', modifiers: [], action: 'prevVerse' },
+    goLive: { key: 'Enter', modifiers: ['ctrl'], action: 'goLive' },
+    toggleFreeze: { key: 'f', modifiers: ['ctrl'], action: 'toggleFreeze' },
+    clearLive: { key: 'Escape', modifiers: [], action: 'clearLive' },
+    toggleAutoPause: { key: 'p', modifiers: ['ctrl'], action: 'toggleAutoPause' },
+  },
+};
+
+const DEFAULT_USER_PROFILE_ID = 'profile-default';
+
+function cloneSettings(settings: Settings): Settings {
+  return {
+    ...settings,
+    remoteControl: { ...settings.remoteControl },
+    presentation: { ...settings.presentation },
+    hotkeys: Object.fromEntries(
+      Object.entries(settings.hotkeys || {}).map(([k, v]) => [k, { ...v, modifiers: [...(v.modifiers || [])] }]),
+    ),
+  };
+}
+
+function cloneOutputTargets(targets: OutputTarget[]): OutputTarget[] {
+  return (targets || []).map((target) => ({ ...target }));
+}
+
+function buildUserProfileSnapshot(
+  state: {
+    settings: Settings;
+    version: string;
+    mode: 'auto' | 'manual';
+    runSheetAuto: { enabled: boolean; intervalSec: number };
+    transitionSettings: { style: 'cut' | 'fade' | 'stinger'; durationMs: number; stingerLabel: string };
+    activeThemeId: string | null;
+    activeVoiceProfileId: string | null;
+    outputTargets: OutputTarget[];
+  },
+  name: string,
+  id?: string,
+): AppUserProfile {
+  return {
+    id: id || crypto.randomUUID(),
+    name,
+    settings: cloneSettings(state.settings),
+    version: state.version,
+    mode: state.mode,
+    runSheetAuto: { ...state.runSheetAuto },
+    transitionSettings: { ...state.transitionSettings },
+    activeThemeId: state.activeThemeId,
+    activeVoiceProfileId: state.activeVoiceProfileId,
+    outputTargets: cloneOutputTargets(state.outputTargets),
+    updatedAt: Date.now(),
+  };
+}
+
+let transitionTimer: ReturnType<typeof setTimeout> | null = null;
+let lastFinalTranscriptAt: number | null = null;
+let lastIntentAt: number | null = null;
+let lastPreviewAt: number | null = null;
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -265,66 +415,25 @@ export const useStore = create<AppState>()(
       activeThemeId: null as string | null,
       voiceProfiles: getDefaultVoiceProfiles(),
       activeVoiceProfileId: 'vp-balanced',
-      outputTargets: [{
-        id: 'main',
-        label: 'Main Output',
-        type: 'window' as const,
-        displayId: null,
-        themeId: null,
-        enabled: true,
-        windowOpen: false,
-      }] as OutputTarget[],
+      userProfiles: [
+        buildUserProfileSnapshot({
+          settings: DEFAULT_SETTINGS,
+          version: 'KJV',
+          mode: 'manual',
+          runSheetAuto: DEFAULT_RUNSHEET_AUTO,
+          transitionSettings: DEFAULT_TRANSITION_SETTINGS,
+          activeThemeId: null,
+          activeVoiceProfileId: 'vp-balanced',
+          outputTargets: DEFAULT_OUTPUT_TARGETS,
+        }, 'Default Profile', DEFAULT_USER_PROFILE_ID),
+      ],
+      activeUserProfileId: DEFAULT_USER_PROFILE_ID,
+      outputTargets: cloneOutputTargets(DEFAULT_OUTPUT_TARGETS),
       isListening: false,
       listeningState: 'idle',
       transcriptionStatus: 'ready',
       isMockMode: false,
-      settings: {
-        deviceId: 'default',
-        providerId: 'browser',
-        openaiApiKey: '',
-        googleSttApiKey: '',
-        chatgptApiKey: '',
-        deepgramApiKey: '',
-        highConfidenceThreshold: 0.8,
-        mediumConfidenceThreshold: 0.6,
-        enableConfidenceGuardrails: true,
-        verseLockEnabled: false,
-        aiCueGateEnabled: true,
-        suggestionCooldownMs: 2500,
-        remoteControl: {
-          enabled: false,
-          port: 4217,
-          token: '',
-        },
-        presentation: {
-          theme: 'dark',
-          layout: 'full-scripture',
-          fontFamily: 'serif',
-          fontScale: 1,
-          textAlignment: 'center',
-          padding: 48,
-          referenceVisible: true,
-          versionVisible: true,
-          backgroundStyle: 'solid',
-          lowerThirdPosition: 'bottom-center',
-          broadcastSafe: false,
-          backgroundColor: '',
-          backgroundOpacity: 100,
-          textColor: '',
-          referenceColor: '',
-          textShadow: false,
-          verseQuotes: false,
-        },
-        targetDisplayId: null,
-        hotkeys: {
-          nextVerse: { key: 'ArrowRight', modifiers: [], action: 'nextVerse' },
-          prevVerse: { key: 'ArrowLeft', modifiers: [], action: 'prevVerse' },
-          goLive: { key: 'Enter', modifiers: ['ctrl'], action: 'goLive' },
-          toggleFreeze: { key: 'f', modifiers: ['ctrl'], action: 'toggleFreeze' },
-          clearLive: { key: 'Escape', modifiers: [], action: 'clearLive' },
-          toggleAutoPause: { key: 'p', modifiers: ['ctrl'], action: 'toggleAutoPause' },
-        },
-      },
+      settings: cloneSettings(DEFAULT_SETTINGS),
       version: 'KJV',
       availableVersions: ['KJV'],
       previewScripture: null,
@@ -336,6 +445,13 @@ export const useStore = create<AppState>()(
       pendingCommands: [],
       suggestions: [],
       queue: [],
+      runSheetAuto: { ...DEFAULT_RUNSHEET_AUTO },
+      transitionSettings: { ...DEFAULT_TRANSITION_SETTINGS },
+      transitionRuntime: null,
+      themeAssets: [],
+      latencySamples: [],
+      sessionEvents: [],
+      onboardingCompleted: false,
       liveOutputState: {
         targetDisplayId: null,
         windowBounds: null,
@@ -371,13 +487,15 @@ export const useStore = create<AppState>()(
       duplicateTheme: (id) => {
         const source = get().themes.find(t => t.id === id);
         if (!source) return '';
+        const normalizedElements = normalizeThemeElements(source.elements);
         const copy: Theme = {
           ...source,
           id: crypto.randomUUID(),
           name: `${source.name} (copy)`,
           elements: {
-            scripture: { ...source.elements.scripture },
-            reference: { ...source.elements.reference },
+            scripture: { ...normalizedElements.scripture },
+            reference: { ...normalizedElements.reference },
+            boxes: normalizedElements.boxes.map((box) => ({ ...box })),
           },
           settings: { ...source.settings },
           createdAt: Date.now(),
@@ -416,6 +534,7 @@ export const useStore = create<AppState>()(
             }));
           }
         }
+        get().saveCurrentToActiveProfile();
       },
       addVoiceProfileFromCurrent: (name) => {
         const trimmed = name.trim();
@@ -425,6 +544,7 @@ export const useStore = create<AppState>()(
           voiceProfiles: [...state.voiceProfiles, profile],
           activeVoiceProfileId: profile.id,
         }));
+        get().saveCurrentToActiveProfile();
         return profile.id;
       },
       updateVoiceProfileFromCurrent: (id) => {
@@ -448,6 +568,7 @@ export const useStore = create<AppState>()(
             activeVoiceProfileId,
           };
         });
+        get().saveCurrentToActiveProfile();
       },
       setActiveVoiceProfile: (id) => {
         const profile = get().voiceProfiles.find((p) => p.id === id);
@@ -464,8 +585,95 @@ export const useStore = create<AppState>()(
             suggestionCooldownMs: profile.suggestionCooldownMs,
           },
         }));
+        get().saveCurrentToActiveProfile();
       },
-      // ── Output target management ──
+      createUserProfile: (name) => {
+        const trimmed = name.trim();
+        const state = get();
+        const profileName = trimmed || `Profile ${state.userProfiles.length + 1}`;
+        const profile = buildUserProfileSnapshot({
+          settings: state.settings,
+          version: state.version,
+          mode: state.mode,
+          runSheetAuto: state.runSheetAuto,
+          transitionSettings: state.transitionSettings,
+          activeThemeId: state.activeThemeId,
+          activeVoiceProfileId: state.activeVoiceProfileId,
+          outputTargets: state.outputTargets,
+        }, profileName);
+        set((s) => ({
+          userProfiles: [...s.userProfiles, profile],
+          activeUserProfileId: profile.id,
+        }));
+        return profile.id;
+      },
+      renameUserProfile: (id, name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        set((state) => ({
+          userProfiles: state.userProfiles.map((profile) =>
+            profile.id === id
+              ? { ...profile, name: trimmed, updatedAt: Date.now() }
+              : profile,
+          ),
+        }));
+      },
+      deleteUserProfile: (id) => {
+        const state = get();
+        if (state.userProfiles.length <= 1) return;
+        const remaining = state.userProfiles.filter((profile) => profile.id !== id);
+        if (remaining.length === 0) return;
+        const deletingActive = state.activeUserProfileId === id;
+        const nextActiveId = deletingActive ? remaining[0].id : (state.activeUserProfileId ?? remaining[0].id);
+        const nextProfile = remaining.find((profile) => profile.id === nextActiveId) ?? remaining[0];
+        set({
+          userProfiles: remaining,
+          activeUserProfileId: nextActiveId,
+          settings: cloneSettings(nextProfile.settings),
+          version: nextProfile.version,
+          mode: nextProfile.mode,
+          runSheetAuto: { ...nextProfile.runSheetAuto },
+          transitionSettings: { ...nextProfile.transitionSettings },
+          activeThemeId: nextProfile.activeThemeId,
+          activeVoiceProfileId: nextProfile.activeVoiceProfileId,
+          outputTargets: cloneOutputTargets(nextProfile.outputTargets),
+        });
+      },
+      setActiveUserProfile: (id) => {
+        const profile = get().userProfiles.find((p) => p.id === id);
+        if (!profile) return;
+        set({
+          activeUserProfileId: id,
+          settings: cloneSettings(profile.settings),
+          version: profile.version,
+          mode: profile.mode,
+          runSheetAuto: { ...profile.runSheetAuto },
+          transitionSettings: { ...profile.transitionSettings },
+          activeThemeId: profile.activeThemeId,
+          activeVoiceProfileId: profile.activeVoiceProfileId,
+          outputTargets: cloneOutputTargets(profile.outputTargets),
+        });
+      },
+      saveCurrentToActiveProfile: () => {
+        const state = get();
+        const activeId = state.activeUserProfileId;
+        if (!activeId) return;
+        const currentProfile = state.userProfiles.find((profile) => profile.id === activeId);
+        const snapshot = buildUserProfileSnapshot({
+          settings: state.settings,
+          version: state.version,
+          mode: state.mode,
+          runSheetAuto: state.runSheetAuto,
+          transitionSettings: state.transitionSettings,
+          activeThemeId: state.activeThemeId,
+          activeVoiceProfileId: state.activeVoiceProfileId,
+          outputTargets: state.outputTargets,
+        }, currentProfile?.name || 'Profile', activeId);
+        set((s) => ({
+          userProfiles: s.userProfiles.map((profile) => profile.id === activeId ? snapshot : profile),
+        }));
+      },
+      // Output target management
       addOutputTarget: () => {
         const id = crypto.randomUUID();
         const target: OutputTarget = {
@@ -478,6 +686,7 @@ export const useStore = create<AppState>()(
           windowOpen: false,
         };
         set(state => ({ outputTargets: [...state.outputTargets, target] }));
+        get().saveCurrentToActiveProfile();
         return id;
       },
       addNDITarget: () => {
@@ -494,10 +703,12 @@ export const useStore = create<AppState>()(
           ndiSourceName: ndiCount > 0 ? `ScriptureFlow ${ndiCount + 1}` : 'ScriptureFlow',
         };
         set(state => ({ outputTargets: [...state.outputTargets, target] }));
+        get().saveCurrentToActiveProfile();
         return id;
       },
       removeOutputTarget: (id) => {
         set(state => ({ outputTargets: state.outputTargets.filter(t => t.id !== id) }));
+        get().saveCurrentToActiveProfile();
         if (typeof window !== 'undefined' && window.electronAPI) {
           window.electronAPI.closeLiveWindow(id);
         }
@@ -506,9 +717,13 @@ export const useStore = create<AppState>()(
         set(state => ({
           outputTargets: state.outputTargets.map(t => t.id === id ? { ...t, ...updates } : t),
         }));
+        get().saveCurrentToActiveProfile();
       },
 
-      setMode: (mode) => set({ mode }),
+      setMode: (mode) => {
+        set({ mode });
+        get().saveCurrentToActiveProfile();
+      },
       toggleAutoPause: () => set((state) => ({ isAutoPaused: !state.isAutoPaused })),
       toggleFreeze: () => {
         set((state) => {
@@ -522,7 +737,10 @@ export const useStore = create<AppState>()(
       setTranscriptionStatus: (status) => set({ transcriptionStatus: status }),
       setIsListening: (isListening) => set({ isListening }),
       setIsMockMode: (isMockMode) => set({ isMockMode }),
-      updateSettings: (newSettings) => set((state) => ({ settings: { ...state.settings, ...newSettings } })),
+      updateSettings: (newSettings) => {
+        set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+        get().saveCurrentToActiveProfile();
+      },
       
       setVersion: (version) => {
         set({ version });
@@ -540,12 +758,23 @@ export const useStore = create<AppState>()(
           version !== liveScripture.version;
           
         get().setLiveOutputState({ previewDiffersFromLive: differs });
+        get().saveCurrentToActiveProfile();
       },
       
       setPreview: (scripture) => {
+        const now = Date.now();
         set({ previewScripture: scripture });
         if (scripture) {
           get().addToHistory(scripture);
+          get().addSessionEvent({
+            type: 'preview',
+            label: `${scripture.book} ${scripture.chapter}:${scripture.verse}${scripture.endVerse ? `-${scripture.endVerse}` : ''}`,
+            scripture,
+          });
+          if (lastIntentAt) {
+            get().addLatencySample({ intentToPreviewMs: now - lastIntentAt });
+          }
+          lastPreviewAt = now;
         }
         
         const { liveScripture } = get();
@@ -564,10 +793,24 @@ export const useStore = create<AppState>()(
           get().logActivity('Cannot update live: Output is frozen', 'warning');
           return;
         }
+        if (transitionTimer) {
+          clearTimeout(transitionTimer);
+          transitionTimer = null;
+        }
+        set({ transitionRuntime: null });
         set({ liveScripture: scripture });
 
         // Sync confirmedRef so the AI interpreter always knows what's on screen
         if (scripture) {
+          const now = Date.now();
+          const label = `${scripture.book} ${scripture.chapter}:${scripture.verse}${scripture.endVerse ? `-${scripture.endVerse}` : ''}`;
+          get().addSessionEvent({ type: 'live', label, scripture });
+          if (lastPreviewAt) {
+            get().addLatencySample({ previewToLiveMs: now - lastPreviewAt });
+          }
+          if (lastFinalTranscriptAt) {
+            get().addLatencySample({ totalToLiveMs: now - lastFinalTranscriptAt });
+          }
           const confirmed: ConfirmedRef = {
             book:        scripture.book,
             chapter:     scripture.chapter,
@@ -681,7 +924,13 @@ export const useStore = create<AppState>()(
           get().logActivity('Cannot clear live: Output is frozen', 'warning');
           return;
         }
+        if (transitionTimer) {
+          clearTimeout(transitionTimer);
+          transitionTimer = null;
+        }
         set({ liveScripture: null });
+        set({ transitionRuntime: null });
+        get().addSessionEvent({ type: 'clear', label: 'Clear live output', scripture: null });
         get().setLiveOutputState({ currentScripture: null, previewDiffersFromLive: get().previewScripture !== null });
         // Clear all enabled output windows.
         const { outputTargets, providerStatuses } = get();
@@ -758,6 +1007,23 @@ export const useStore = create<AppState>()(
         });
 
         if (!transcript.isFinal) return;
+
+        const ingestAt = Date.now();
+        lastFinalTranscriptAt = ingestAt;
+        if (typeof transcript.timestamp === 'number' && Number.isFinite(transcript.timestamp)) {
+          get().addLatencySample({
+            provider: transcript.provider,
+            audioToTranscriptMs: Math.max(0, ingestAt - transcript.timestamp),
+          });
+        }
+        get().addSessionEvent({
+          type: 'transcript',
+          label: transcript.text.slice(0, 140),
+          details: {
+            provider: transcript.provider,
+            confidence: transcript.confidence,
+          },
+        });
 
         // ── Maintain the rolling buffer (last 6 final chunks) ─────────────
         set((state) => ({
@@ -974,6 +1240,16 @@ export const useStore = create<AppState>()(
 
       processCommand: (command) => {
         const { settings, previewScripture, liveScripture, version, isAutoPaused, isLiveFrozen, mode } = get();
+        const now = Date.now();
+        lastIntentAt = now;
+        if (lastFinalTranscriptAt) {
+          get().addLatencySample({ transcriptToIntentMs: now - lastFinalTranscriptAt });
+        }
+        get().addSessionEvent({
+          type: 'command',
+          label: `${command.intent} (${Math.round(command.confidence * 100)}%)`,
+          details: command.payload,
+        });
         set((state) => ({ commands: [command, ...state.commands].slice(0, 50) }));
         
         const result = executeCommand(command, previewScripture, version, settings);
@@ -1015,7 +1291,7 @@ export const useStore = create<AppState>()(
               ],
             }));
           } else if (result.canUpdateLive && mode === 'auto' && !isAutoPaused && !isLiveFrozen) {
-            get().setLive(result.scripture);
+            get().goLiveWithTransition(result.scripture);
           }
         }
       },
@@ -1034,7 +1310,7 @@ export const useStore = create<AppState>()(
           if (cmd.payload?.resultScripture) {
             get().setPreview(cmd.payload.resultScripture);
             if (mode === 'auto' && !isAutoPaused && !isLiveFrozen) {
-              get().setLive(cmd.payload.resultScripture);
+              get().goLiveWithTransition(cmd.payload.resultScripture);
             }
           }
         }
@@ -1102,6 +1378,8 @@ export const useStore = create<AppState>()(
             ].slice(-30),
           };
         });
+        const ref = `${scripture.book} ${scripture.chapter}:${scripture.verse}${scripture.endVerse ? `-${scripture.endVerse}` : ''}`;
+        get().addSessionEvent({ type: 'queue', label: `Queued ${ref}`, scripture });
       },
 
       queuePreview: () => {
@@ -1134,7 +1412,7 @@ export const useStore = create<AppState>()(
         set({ queue: rest });
 
         get().setPreview(next.scripture);
-        get().setLive(next.scripture);
+        get().goLiveWithTransition(next.scripture);
 
         const ref = `${next.scripture.book} ${next.scripture.chapter}:${next.scripture.verse}${next.scripture.endVerse ? `-${next.scripture.endVerse}` : ''}`;
         get().logActivity(`Queue live: ${ref}`, 'success');
@@ -1146,11 +1424,145 @@ export const useStore = create<AppState>()(
         get().sendQueuedReference(next.id);
       },
 
+      updateRunSheetAuto: (updates) => {
+        set((state) => ({
+          runSheetAuto: {
+            ...state.runSheetAuto,
+            ...updates,
+            intervalSec: Math.max(3, Math.min(600, Math.round(updates.intervalSec ?? state.runSheetAuto.intervalSec))),
+          },
+        }));
+        get().saveCurrentToActiveProfile();
+      },
+
+      setTransitionSettings: (updates) => {
+        set((state) => ({
+          transitionSettings: {
+            ...state.transitionSettings,
+            ...updates,
+            durationMs: Math.max(0, Math.min(5000, Math.round(updates.durationMs ?? state.transitionSettings.durationMs))),
+          },
+        }));
+        get().saveCurrentToActiveProfile();
+      },
+
+      goLiveWithTransition: (scripture, styleOverride) => {
+        if (!scripture) return;
+        if (transitionTimer) {
+          clearTimeout(transitionTimer);
+          transitionTimer = null;
+        }
+
+        const state = get();
+        const style = (styleOverride ?? state.transitionSettings.style) as typeof state.transitionSettings.style;
+        const durationMs = Math.max(0, Math.min(5000, state.transitionSettings.durationMs || 0));
+
+        if (style === 'cut' || durationMs === 0) {
+          set({ transitionRuntime: null });
+          state.setLive(scripture);
+          return;
+        }
+
+        const startedAt = Date.now();
+        set({
+          transitionRuntime: {
+            active: true,
+            style,
+            startedAt,
+            endsAt: startedAt + durationMs,
+          },
+        });
+        state.logActivity(
+          style === 'stinger'
+            ? `Transition: ${state.transitionSettings.stingerLabel} (${durationMs} ms)`
+            : `Transition: ${style} (${durationMs} ms)`,
+          'info',
+        );
+
+        transitionTimer = setTimeout(() => {
+          transitionTimer = null;
+          set({ transitionRuntime: null });
+          get().setLive(scripture);
+        }, durationMs);
+      },
+
+      addThemeAsset: (asset) => {
+        const id = crypto.randomUUID();
+        set((state) => ({
+          themeAssets: [
+            {
+              id,
+              name: asset.name,
+              type: asset.type,
+              dataUrl: asset.dataUrl,
+              mimeType: asset.mimeType,
+              createdAt: Date.now(),
+            },
+            ...state.themeAssets,
+          ].slice(0, 120),
+        }));
+        get().logActivity(`Theme asset added: ${asset.name}`, 'success');
+        return id;
+      },
+
+      removeThemeAsset: (id) => {
+        set((state) => ({ themeAssets: state.themeAssets.filter((asset) => asset.id !== id) }));
+      },
+
+      addLatencySample: (sample) => {
+        const now = Date.now();
+        set((state) => ({
+          latencySamples: [
+            {
+              id: crypto.randomUUID(),
+              timestamp: now,
+              ...sample,
+            },
+            ...state.latencySamples,
+          ].slice(0, 400),
+        }));
+      },
+
+      clearLatencySamples: () => set({ latencySamples: [] }),
+
+      addSessionEvent: (event) => {
+        set((state) => ({
+          sessionEvents: [
+            {
+              id: crypto.randomUUID(),
+              timestamp: Date.now(),
+              ...event,
+            },
+            ...state.sessionEvents,
+          ].slice(0, 500),
+        }));
+      },
+
+      clearSessionEvents: () => set({ sessionEvents: [] }),
+
+      replaySessionEvent: (id) => {
+        const event = get().sessionEvents.find((entry) => entry.id === id);
+        if (!event) return;
+        if (event.type === 'clear') {
+          get().clearLive();
+          return;
+        }
+        if (event.scripture) {
+          get().setPreview(event.scripture);
+          if (event.type === 'live') {
+            get().goLiveWithTransition(event.scripture, 'cut');
+          }
+        }
+      },
+
+      setOnboardingCompleted: (value) => set({ onboardingCompleted: value }),
+
       // Live Output Actions
       setLiveOutputState: (state) => set((s) => ({ liveOutputState: { ...s.liveOutputState, ...state } })),
       setTargetDisplay: (displayId) => {
         set((state) => ({ settings: { ...state.settings, targetDisplayId: displayId } }));
         get().setLiveOutputState({ targetDisplayId: displayId });
+        get().saveCurrentToActiveProfile();
       },
       setLiveWindowBounds: (windowId, bounds) => {
         if (windowId === 'main') get().setLiveOutputState({ windowBounds: bounds });
@@ -1184,19 +1596,26 @@ export const useStore = create<AppState>()(
           currentTheme: settings?.theme || get().settings?.presentation?.theme || 'dark',
           currentLayout: settings?.layout || get().settings?.presentation?.layout || 'full-scripture'
         });
+        get().saveCurrentToActiveProfile();
       },
       setAvailableDisplays: (displays) => set({ availableDisplays: displays }),
-      updateHotkey: (action, hotkey) => set((state) => ({
-        settings: {
-          ...state.settings,
-          hotkeys: { ...(state.settings?.hotkeys || {}), [action]: hotkey }
-        }
-      })),
-      removeHotkey: (action) => set((state) => {
-        const newHotkeys = { ...(state.settings?.hotkeys || {}) };
-        delete newHotkeys[action];
-        return { settings: { ...state.settings, hotkeys: newHotkeys } };
-      }),
+      updateHotkey: (action, hotkey) => {
+        set((state) => ({
+          settings: {
+            ...state.settings,
+            hotkeys: { ...(state.settings?.hotkeys || {}), [action]: hotkey }
+          }
+        }));
+        get().saveCurrentToActiveProfile();
+      },
+      removeHotkey: (action) => {
+        set((state) => {
+          const newHotkeys = { ...(state.settings?.hotkeys || {}) };
+          delete newHotkeys[action];
+          return { settings: { ...state.settings, hotkeys: newHotkeys } };
+        });
+        get().saveCurrentToActiveProfile();
+      },
 
       setOutputSettings: (settings) => set((state) => ({ 
         outputSettings: { ...state.outputSettings, ...settings } 
@@ -1227,51 +1646,154 @@ export const useStore = create<AppState>()(
         activeThemeId: state.activeThemeId,
         voiceProfiles: state.voiceProfiles,
         activeVoiceProfileId: state.activeVoiceProfileId,
+        userProfiles: state.userProfiles,
+        activeUserProfileId: state.activeUserProfileId,
         queue: state.queue,
+        runSheetAuto: state.runSheetAuto,
+        transitionSettings: state.transitionSettings,
+        themeAssets: state.themeAssets,
+        latencySamples: state.latencySamples,
+        sessionEvents: state.sessionEvents,
+        onboardingCompleted: state.onboardingCompleted,
         // Persist targets but reset runtime windowOpen to false
         outputTargets: state.outputTargets.map(t => ({ ...t, windowOpen: false })),
       }),
       merge: (persistedState: any, currentState) => {
+        const mergedSettings: Settings = {
+          ...currentState.settings,
+          ...(persistedState.settings || {}),
+          presentation: {
+            ...(currentState.settings?.presentation || {}),
+            ...(persistedState.settings?.presentation || {}),
+            verseQuotes: false,
+          },
+          hotkeys: {
+            ...(currentState.settings?.hotkeys || {}),
+            ...(persistedState.settings?.hotkeys || {}),
+          },
+          remoteControl: {
+            ...(currentState.settings?.remoteControl || {}),
+            ...(persistedState.settings?.remoteControl || {}),
+          },
+        };
+
+        const mergedOutputTargets: OutputTarget[] = persistedState.outputTargets?.length
+          ? persistedState.outputTargets.map((t: any) => ({ ...t, windowOpen: false }))
+          : cloneOutputTargets(currentState.outputTargets);
+
+        const migratedProfile = buildUserProfileSnapshot({
+          settings: mergedSettings,
+          version: persistedState.version || currentState.version,
+          mode: persistedState.mode || currentState.mode,
+          runSheetAuto: {
+            ...DEFAULT_RUNSHEET_AUTO,
+            ...(persistedState.runSheetAuto || {}),
+          },
+          transitionSettings: {
+            ...DEFAULT_TRANSITION_SETTINGS,
+            ...(persistedState.transitionSettings || {}),
+          },
+          activeThemeId: persistedState.activeThemeId || null,
+          activeVoiceProfileId: persistedState.activeVoiceProfileId || currentState.activeVoiceProfileId,
+          outputTargets: mergedOutputTargets,
+        }, 'Default Profile', DEFAULT_USER_PROFILE_ID);
+
+        const persistedProfiles = Array.isArray(persistedState.userProfiles)
+          ? persistedState.userProfiles.map((profile: any, index: number) => {
+              const name = typeof profile?.name === 'string' && profile.name.trim()
+                ? profile.name.trim()
+                : `Profile ${index + 1}`;
+              const settings = profile?.settings
+                ? {
+                    ...mergedSettings,
+                    ...profile.settings,
+                    presentation: {
+                      ...(mergedSettings.presentation || {}),
+                      ...(profile.settings?.presentation || {}),
+                      verseQuotes: false,
+                    },
+                    hotkeys: {
+                      ...(mergedSettings.hotkeys || {}),
+                      ...(profile.settings?.hotkeys || {}),
+                    },
+                    remoteControl: {
+                      ...(mergedSettings.remoteControl || {}),
+                      ...(profile.settings?.remoteControl || {}),
+                    },
+                  }
+                : mergedSettings;
+
+              return buildUserProfileSnapshot({
+                settings,
+                version: profile?.version || migratedProfile.version,
+                mode: profile?.mode || migratedProfile.mode,
+                runSheetAuto: {
+                  ...DEFAULT_RUNSHEET_AUTO,
+                  ...(profile?.runSheetAuto || {}),
+                },
+                transitionSettings: {
+                  ...DEFAULT_TRANSITION_SETTINGS,
+                  ...(profile?.transitionSettings || {}),
+                },
+                activeThemeId: profile?.activeThemeId ?? migratedProfile.activeThemeId,
+                activeVoiceProfileId: profile?.activeVoiceProfileId ?? migratedProfile.activeVoiceProfileId,
+                outputTargets: Array.isArray(profile?.outputTargets) && profile.outputTargets.length > 0
+                  ? profile.outputTargets.map((t: any) => ({ ...t, windowOpen: false }))
+                  : mergedOutputTargets,
+              }, name, profile?.id);
+            })
+          : [];
+
+        const userProfiles = persistedProfiles.length > 0 ? persistedProfiles : [migratedProfile];
+        const activeUserProfileId = userProfiles.some((profile) => profile.id === persistedState.activeUserProfileId)
+          ? persistedState.activeUserProfileId
+          : userProfiles[0].id;
+        const activeProfile = userProfiles.find((profile) => profile.id === activeUserProfileId) ?? userProfiles[0];
+
         return {
           ...currentState,
           ...persistedState,
           outputSettings: {
             ...currentState.outputSettings,
-            ...(persistedState.outputSettings || {})
+            ...(persistedState.outputSettings || {}),
           },
           themes: (persistedState.themes || []).map((theme: any) => ({
             ...theme,
             settings: theme.settings ? { ...theme.settings, verseQuotes: false } : theme.settings,
+            elements: normalizeThemeElements(theme.elements),
           })),
-          activeThemeId: persistedState.activeThemeId || null,
           voiceProfiles: Array.isArray(persistedState.voiceProfiles) && persistedState.voiceProfiles.length > 0
             ? persistedState.voiceProfiles
             : currentState.voiceProfiles,
-          activeVoiceProfileId: persistedState.activeVoiceProfileId || currentState.activeVoiceProfileId,
+          activeVoiceProfileId: activeProfile.activeVoiceProfileId || currentState.activeVoiceProfileId,
+          userProfiles,
+          activeUserProfileId,
           queue: Array.isArray(persistedState.queue) ? persistedState.queue : currentState.queue,
-          outputTargets: persistedState.outputTargets?.length
-            ? persistedState.outputTargets.map((t: any) => ({ ...t, windowOpen: false }))
-            : currentState.outputTargets,
-          settings: {
-            ...currentState.settings,
-            ...(persistedState.settings || {}),
-            presentation: {
-              ...(currentState.settings?.presentation || {}),
-              ...(persistedState.settings?.presentation || {}),
-              verseQuotes: false,
-            },
-            hotkeys: {
-              ...(currentState.settings?.hotkeys || {}),
-              ...(persistedState.settings?.hotkeys || {})
-            },
-            remoteControl: {
-              ...(currentState.settings?.remoteControl || {}),
-              ...(persistedState.settings?.remoteControl || {}),
-            }
-          }
+          runSheetAuto: {
+            ...DEFAULT_RUNSHEET_AUTO,
+            ...(activeProfile.runSheetAuto || {}),
+          },
+          transitionSettings: {
+            ...DEFAULT_TRANSITION_SETTINGS,
+            ...(activeProfile.transitionSettings || {}),
+          },
+          transitionRuntime: null,
+          themeAssets: Array.isArray(persistedState.themeAssets) ? persistedState.themeAssets : currentState.themeAssets,
+          latencySamples: Array.isArray(persistedState.latencySamples) ? persistedState.latencySamples : currentState.latencySamples,
+          sessionEvents: Array.isArray(persistedState.sessionEvents) ? persistedState.sessionEvents : currentState.sessionEvents,
+          onboardingCompleted: typeof persistedState.onboardingCompleted === 'boolean'
+            ? persistedState.onboardingCompleted
+            : currentState.onboardingCompleted,
+          outputTargets: cloneOutputTargets(activeProfile.outputTargets).map((target) => ({ ...target, windowOpen: false })),
+          settings: cloneSettings(activeProfile.settings),
+          version: activeProfile.version,
+          mode: activeProfile.mode,
+          activeThemeId: activeProfile.activeThemeId,
         };
       }
     }
   )
 );
+
+
 

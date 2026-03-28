@@ -50,7 +50,7 @@ export default function RemoteControlBridge() {
       const state = useStore.getState();
       switch (type) {
         case 'goLive':
-          if (state.previewScripture) state.setLive(state.previewScripture);
+          if (state.previewScripture) state.goLiveWithTransition(state.previewScripture);
           break;
         case 'clearLive':
           state.clearLive();

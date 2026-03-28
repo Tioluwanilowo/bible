@@ -1,6 +1,27 @@
 export {};
 
 declare global {
+  interface NDIDiagnosticsRow {
+    targetId: string;
+    sourceName: string;
+    active: boolean;
+    startedAt: number;
+    uptimeMs: number;
+    frameCount: number;
+    frameErrors: number;
+    fps: number;
+    lastFrameAt: number | null;
+    runtimeDetected: boolean;
+    runtimePath?: string;
+  }
+
+  interface NDIDiagnosticsSummary {
+    activeCount: number;
+    runtimeDetected: boolean;
+    runtimePath?: string;
+    checkedAt: number;
+  }
+
   interface Window {
     electronAPI?: {
       sendToLive: (windowId: string, data: any) => void;
@@ -29,6 +50,7 @@ declare global {
       ndiStart: (sourceName: string, targetId?: string) => Promise<{ ok: boolean; error?: string; targetId?: string }>;
       ndiStop: (targetId?: string) => void;
       ndiGetStatus: (targetId?: string) => Promise<{ status: string; reason?: string; sourceName?: string; targetId?: string; activeCount?: number }>;
+      ndiGetDiagnostics: (targetId?: string) => Promise<{ rows: NDIDiagnosticsRow[]; summary: NDIDiagnosticsSummary }>;
       onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => void) => (() => void) | void;
 
       /** Open a URL in the system default browser */

@@ -4,7 +4,7 @@ import { Play, Square, ChevronLeft, ChevronRight, Snowflake, Pause, ListPlus, Se
 
 export default function Controls() {
   const {
-    mode, setMode, version, setVersion, previewScripture, setLive, clearLive,
+    mode, setMode, version, setVersion, previewScripture, goLiveWithTransition, clearLive,
     isAutoPaused, toggleAutoPause, isLiveFrozen, toggleFreeze,
     nextVerse, prevVerse, availableVersions,
     queue, queuePreview, sendNextQueuedLive,
@@ -12,7 +12,7 @@ export default function Controls() {
 
   const handleGoLive = () => {
     if (previewScripture) {
-      setLive(previewScripture);
+      goLiveWithTransition(previewScripture);
     }
   };
 

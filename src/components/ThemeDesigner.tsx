@@ -1,11 +1,17 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
   X, Layers, AlignLeft, AlignCenter, AlignRight, AlignJustify, Eye, EyeOff,
-  Zap, Monitor, Plus, Copy, Trash2, Pencil, Maximize2,
+  Zap, Monitor, Plus, Copy, Trash2, Pencil, Maximize2, ArrowUp, ArrowDown, Square, Upload, Image as ImageIcon,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { Theme, ThemeElements, ElementPosition, PresentationSettings, SNAP_PRESETS } from '../types';
+import { DEFAULT_ELEMENTS, Theme, ThemeElements, ThemeBoxLayer, ElementPosition, PresentationSettings, SNAP_PRESETS, ThemeAsset } from '../types';
+import {
+  getElementBounds,
+  getAlignmentCandidates,
+  getSnapPosition,
+  type SmartGuide,
+} from '../lib/canvas/smartGuides';
 
 // ─── Sample verses ───────────────────────────────────────────────
 const SAMPLE_VERSES = [
@@ -20,6 +26,16 @@ const FONT_MAP: Record<string, string> = {
   sans:  'system-ui,-apple-system,"Segoe UI",sans-serif',
   mono:  '"Courier New",Courier,monospace',
 };
+
+function hexToRgba(hex: string, opacity: number): string {
+  const normalized = (hex || '#000000').replace('#', '');
+  const safe = normalized.length === 6 ? normalized : '000000';
+  const r = parseInt(safe.slice(0, 2), 16) || 0;
+  const g = parseInt(safe.slice(2, 4), 16) || 0;
+  const b = parseInt(safe.slice(4, 6), 16) || 0;
+  const clamped = Math.max(0, Math.min(100, opacity));
+  return `rgba(${r},${g},${b},${clamped / 100})`;
+}
 
 // ─── Shared UI helpers ────────────────────────────────────────────
 function SectionHeader({ title }: { title: string }) {
@@ -151,33 +167,48 @@ function AlignGrid({
 }
 
 // ─── Drag Canvas ─────────────────────────────────────────────────
-const Y_SNAPS = [
-  { y: 5,  label: 'Top' },
-  { y: 35, label: 'Middle' },
-  { y: 65, label: 'Lower Third' },
-];
-const SNAP_THRESHOLD = 3;
+const SMART_SNAP_THRESHOLD_PX = 6;
 
 interface DragCanvasProps {
   theme: Theme;
   sampleVerse: { text: string; reference: string; version: string };
   selectedElement: 'scripture' | 'reference' | null;
-  onSelectElement: (el: 'scripture' | 'reference') => void;
+  activeBoxId: string | null;
+  onSelectElement: (el: 'scripture' | 'reference' | null) => void;
+  onSelectBox: (boxId: string | null) => void;
   onElementsChange: (elements: ThemeElements) => void;
 }
 
-function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onElementsChange }: DragCanvasProps) {
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read selected file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function DragCanvas({ theme, sampleVerse, selectedElement, activeBoxId, onSelectElement, onSelectBox, onElementsChange }: DragCanvasProps) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<'scripture' | 'reference' | null>(null);
+  const [draggingBoxId, setDraggingBoxId] = useState<string | null>(null);
   const [resizing, setResizing] = useState<'scripture' | 'reference' | null>(null);
   const [hovered, setHovered] = useState<'scripture' | 'reference' | null>(null);
-  const [activeSnaps, setActiveSnaps] = useState<number[]>([]);
+  const [smartGuides, setSmartGuides] = useState<SmartGuide[]>([]);
   const [canvasPx, setCanvasPx] = useState(600);
   const dragMeta = useRef<{
     startMouseX: number; startMouseY: number;
     startElemX: number; startElemY: number;
     canvasBounds: DOMRect;
     element: 'scripture' | 'reference';
+  } | null>(null);
+  const boxDragMeta = useRef<{
+    startMouseX: number;
+    startMouseY: number;
+    startBoxX: number;
+    startBoxY: number;
+    boxId: string;
+    canvasBounds: DOMRect;
   } | null>(null);
   const resizeMeta = useRef<{
     startMouseX: number;
@@ -197,16 +228,14 @@ function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onEl
     return () => ro.disconnect();
   }, []);
 
-  const snapY = (y: number) => {
-    for (const zone of Y_SNAPS) {
-      if (Math.abs(y - zone.y) < SNAP_THRESHOLD) return zone.y;
-    }
-    return y;
-  };
+  const clearSmartGuides = useCallback(() => {
+    setSmartGuides([]);
+  }, []);
 
   const handleMouseDown = (element: 'scripture' | 'reference', e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    clearSmartGuides();
     onSelectElement(element);
     const bounds = canvasRef.current?.getBoundingClientRect();
     if (!bounds) return;
@@ -218,31 +247,127 @@ function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onEl
     setDragging(element);
   };
 
+  const handleBoxMouseDown = (boxId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clearSmartGuides();
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    const box = (theme.elements.boxes ?? []).find((candidate) => candidate.id === boxId);
+    if (!box) return;
+    onSelectElement(null);
+    onSelectBox(boxId);
+    boxDragMeta.current = {
+      startMouseX: e.clientX,
+      startMouseY: e.clientY,
+      startBoxX: box.x,
+      startBoxY: box.y,
+      boxId,
+      canvasBounds: bounds,
+    };
+    setDraggingBoxId(boxId);
+  };
+
   useEffect(() => {
     if (!dragging) return;
     const handleMove = (e: MouseEvent) => {
       const meta = dragMeta.current;
       if (!meta) return;
       const { startMouseX, startMouseY, startElemX, startElemY, canvasBounds, element } = meta;
-      const w = theme.elements[element].width;
+      const dragElement = theme.elements[element];
+      const w = dragElement.width;
+      const h = dragElement.height ?? (element === 'scripture' ? 20 : 10);
       let newX = startElemX + ((e.clientX - startMouseX) / canvasBounds.width) * 100;
       let newY = startElemY + ((e.clientY - startMouseY) / canvasBounds.height) * 100;
       newX = Math.max(0, Math.min(100 - w, newX));
-      newY = Math.max(0, Math.min(90, newY));
-      const snapped = snapY(newY);
-      setActiveSnaps(Y_SNAPS.filter(z => Math.abs(newY - z.y) < SNAP_THRESHOLD).map(z => z.y));
-      onElementsChange({ ...theme.elements, [element]: { ...theme.elements[element], x: Math.round(newX * 10) / 10, y: snapped } });
+      newY = Math.max(0, Math.min(100 - h, newY));
+
+      const allBounds = getElementBounds(theme.elements);
+      const candidates = getAlignmentCandidates(allBounds, element);
+      const thresholdX = (SMART_SNAP_THRESHOLD_PX / canvasBounds.width) * 100;
+      const thresholdY = (SMART_SNAP_THRESHOLD_PX / canvasBounds.height) * 100;
+      const snap = getSnapPosition({
+        dragBounds: { id: element, x: newX, y: newY, width: w, height: h },
+        candidates,
+        thresholdX,
+        thresholdY,
+      });
+
+      setSmartGuides(snap.guides);
+      onElementsChange({
+        ...theme.elements,
+        [element]: {
+          ...dragElement,
+          x: Math.round(snap.x * 10) / 10,
+          y: Math.round(snap.y * 10) / 10,
+        },
+      });
     };
-    const handleUp = () => { setDragging(null); setActiveSnaps([]); dragMeta.current = null; };
+    const handleUp = () => { setDragging(null); clearSmartGuides(); dragMeta.current = null; };
     window.addEventListener('mousemove', handleMove);
     window.addEventListener('mouseup', handleUp);
     return () => { window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', handleUp); };
-  }, [dragging, theme.elements, onElementsChange]);
+  }, [dragging, theme.elements, onElementsChange, clearSmartGuides]);
+
+  useEffect(() => {
+    if (!draggingBoxId) return;
+    const handleMove = (e: MouseEvent) => {
+      const meta = boxDragMeta.current;
+      if (!meta) return;
+      const boxes = theme.elements.boxes ?? [];
+      const active = boxes.find((box) => box.id === meta.boxId);
+      if (!active) return;
+
+      let newX = meta.startBoxX + ((e.clientX - meta.startMouseX) / meta.canvasBounds.width) * 100;
+      let newY = meta.startBoxY + ((e.clientY - meta.startMouseY) / meta.canvasBounds.height) * 100;
+      newX = Math.max(0, Math.min(100 - active.width, newX));
+      newY = Math.max(0, Math.min(100 - active.height, newY));
+      const allBounds = getElementBounds(theme.elements);
+      const candidates = getAlignmentCandidates(allBounds, `box:${meta.boxId}`);
+      const thresholdX = (SMART_SNAP_THRESHOLD_PX / meta.canvasBounds.width) * 100;
+      const thresholdY = (SMART_SNAP_THRESHOLD_PX / meta.canvasBounds.height) * 100;
+      const snap = getSnapPosition({
+        dragBounds: {
+          id: `box:${meta.boxId}`,
+          x: newX,
+          y: newY,
+          width: active.width,
+          height: active.height,
+        },
+        candidates,
+        thresholdX,
+        thresholdY,
+      });
+
+      setSmartGuides(snap.guides);
+
+      onElementsChange({
+        ...theme.elements,
+        boxes: boxes.map((box) => (
+          box.id === meta.boxId
+            ? { ...box, x: Math.round(snap.x * 10) / 10, y: Math.round(snap.y * 10) / 10 }
+            : box
+        )),
+      });
+    };
+    const handleUp = () => {
+      setDraggingBoxId(null);
+      clearSmartGuides();
+      boxDragMeta.current = null;
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+  }, [draggingBoxId, theme.elements, onElementsChange, clearSmartGuides]);
 
   // ── Resize (right-edge = width, bottom-edge = height) ────────────────────────────────
   const handleResizeDown = (element: 'scripture' | 'reference', direction: 'width' | 'height', e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    clearSmartGuides();
     onSelectElement(element);
     const bounds = canvasRef.current?.getBoundingClientRect();
     if (!bounds) return;
@@ -275,11 +400,11 @@ function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onEl
         onElementsChange({ ...theme.elements, [element]: { ...el, height: Math.round(newHeight * 10) / 10 } });
       }
     };
-    const handleUp = () => { setResizing(null); resizeMeta.current = null; };
+    const handleUp = () => { setResizing(null); clearSmartGuides(); resizeMeta.current = null; };
     window.addEventListener('mousemove', handleMove);
     window.addEventListener('mouseup', handleUp);
     return () => { window.removeEventListener('mousemove', handleMove); window.removeEventListener('mouseup', handleUp); };
-  }, [resizing, theme.elements, onElementsChange]);
+  }, [resizing, theme.elements, onElementsChange, clearSmartGuides]);
 
   const { settings, elements } = theme;
   const ps = settings;
@@ -340,8 +465,10 @@ function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onEl
           userSelect: 'none',
           outline: (isSelected || isHov) ? `2px solid ${borderColor}` : '2px solid transparent',
           outlineOffset: 4,
-          borderRadius: 4,
-          overflow: el.height !== undefined ? 'hidden' : 'visible',
+          borderRadius: el.borderRadius ?? 0,
+          overflow: el.height !== undefined || (el.textHighlightOpacity ?? 0) > 0 ? 'hidden' : 'visible',
+          zIndex: el.zIndex ?? (kind === 'scripture' ? DEFAULT_ELEMENTS.scripture.zIndex : DEFAULT_ELEMENTS.reference.zIndex),
+          background: hexToRgba(el.textHighlightColor || '#000000', el.textHighlightOpacity ?? 0),
           // Vertical alignment inside fixed-height box
           ...(el.height !== undefined ? {
             display: 'flex',
@@ -438,20 +565,77 @@ function DragCanvas({ theme, sampleVerse, selectedElement, onSelectElement, onEl
     ) : null;
   };
 
+  const renderSmartGuides = () => smartGuides.map((guide) => {
+    const baseColor = guide.source === 'canvas' ? 'rgba(34,211,238,0.9)' : 'rgba(129,140,248,0.9)';
+    const glow = guide.source === 'canvas' ? 'rgba(34,211,238,0.45)' : 'rgba(129,140,248,0.45)';
+    if (guide.orientation === 'vertical') {
+      return (
+        <div
+          key={guide.id}
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            left: `${guide.position}%`,
+            width: 1,
+            background: baseColor,
+            boxShadow: `0 0 0 1px ${glow}`,
+            pointerEvents: 'none',
+            zIndex: 10000,
+          }}
+        />
+      );
+    }
+
+    return (
+      <div
+        key={guide.id}
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          top: `${guide.position}%`,
+          height: 1,
+          background: baseColor,
+          boxShadow: `0 0 0 1px ${glow}`,
+          pointerEvents: 'none',
+          zIndex: 10000,
+        }}
+      />
+    );
+  });
+
   return (
-    <div ref={canvasRef} onClick={() => onSelectElement(null as any)}
+    <div ref={canvasRef} onClick={() => { onSelectElement(null); onSelectBox(null); clearSmartGuides(); }}
       style={{ position: 'relative', aspectRatio: '16/9', width: '100%', overflow: 'hidden', borderRadius: 8, ...getBg() }}>
-      {/* Snap guides */}
-      {Y_SNAPS.map(zone => (
-        <div key={zone.y} style={{
-          position: 'absolute', left: 0, right: 0, top: `${zone.y}%`,
-          height: activeSnaps.includes(zone.y) ? 2 : 1,
-          background: activeSnaps.includes(zone.y) ? 'rgba(99,102,241,0.9)' : 'rgba(99,102,241,0.18)',
-          zIndex: 5, pointerEvents: 'none',
-        }}>
-          <span style={{ position: 'absolute', right: 4, top: -14, fontSize: 9, color: activeSnaps.includes(zone.y) ? '#818cf8' : 'rgba(99,102,241,0.35)', fontFamily: 'system-ui,sans-serif' }}>{zone.label}</span>
-        </div>
-      ))}
+      {renderSmartGuides()}
+      {(elements.boxes ?? []).filter(box => box.visible !== false).map((box, idx) => {
+        const selected = activeBoxId === box.id;
+        return (
+          <div
+            key={box.id}
+            onMouseDown={(e) => handleBoxMouseDown(box.id, e)}
+            style={{
+              position: 'absolute',
+              left: `${box.x}%`,
+              top: `${box.y}%`,
+              width: `${box.width}%`,
+              height: `${box.height}%`,
+              zIndex: box.zIndex ?? (10 + idx),
+              cursor: draggingBoxId === box.id ? 'grabbing' : 'grab',
+              borderRadius: box.borderRadius ?? 0,
+              backgroundColor: hexToRgba(box.fillColor || '#000000', box.fillOpacity ?? 0),
+              backgroundImage: box.imageUrl ? `url("${box.imageUrl}")` : undefined,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+              backgroundRepeat: 'no-repeat',
+              outline: selected ? '2px dashed #22c55e' : '1px dashed rgba(34,197,94,0.5)',
+              outlineOffset: selected ? 2 : 0,
+              boxShadow: selected ? '0 0 0 1px rgba(34,197,94,0.35)' : 'none',
+            }}
+          />
+        );
+      })}
       {makeBox('scripture', 'Scripture', displayText)}
       {(ps.referenceVisible ?? true) && makeBox('reference', 'Reference', displayRef)}
     </div>
@@ -492,7 +676,7 @@ const ThemeCard: React.FC<{
 }
 
 // ─── Right Panel: per-element style or global style ───────────────
-type PanelTab = 'scripture' | 'reference' | 'background';
+type PanelTab = 'scripture' | 'reference' | 'boxes' | 'background';
 
 function ElementPanel({ el, kind, theme, onUpdate }: {
   el: ElementPosition;
@@ -503,6 +687,9 @@ function ElementPanel({ el, kind, theme, onUpdate }: {
   const ps = theme.settings;
   const accent = kind === 'scripture' ? 'text-indigo-400' : 'text-amber-400';
   const globalFontSize = kind === 'scripture' ? Math.round(64 * (ps.fontScale ?? 1)) : Math.round(32 * (ps.fontScale ?? 1));
+  const defaultZ = kind === 'scripture'
+    ? (DEFAULT_ELEMENTS.scripture.zIndex ?? 20)
+    : (DEFAULT_ELEMENTS.reference.zIndex ?? 30);
 
   return (
     <div className="space-y-4">
@@ -633,6 +820,57 @@ function ElementPanel({ el, kind, theme, onUpdate }: {
             className="text-xs text-zinc-500 hover:text-zinc-300 underline underline-offset-2">
             Reset to theme default
           </button>
+          <ColorPicker
+            label="Highlight"
+            value={el.textHighlightColor || '#000000'}
+            onChange={v => onUpdate({ textHighlightColor: v })}
+          />
+          <SliderRow
+            label="Highlight Opacity"
+            value={el.textHighlightOpacity ?? 0}
+            min={0}
+            max={100}
+            format={v => `${v}%`}
+            onChange={v => onUpdate({ textHighlightOpacity: v })}
+          />
+          <NumberInput
+            label="Corner Radius"
+            value={el.borderRadius ?? 0}
+            min={0}
+            max={220}
+            step={1}
+            format="px"
+            onChange={v => onUpdate({ borderRadius: v })}
+          />
+        </div>
+      </div>
+
+      {/* Layer */}
+      <div>
+        <SectionHeader title="Layer" />
+        <div className="space-y-2.5">
+          <NumberInput
+            label="Z Index"
+            value={el.zIndex ?? defaultZ}
+            min={-100}
+            max={500}
+            step={1}
+            onChange={v => onUpdate({ zIndex: v })}
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => onUpdate({ zIndex: (el.zIndex ?? defaultZ) - 1 })}
+              className="text-xs px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1"
+            >
+              <ArrowDown className="w-3 h-3" /> Backward
+            </button>
+            <button
+              onClick={() => onUpdate({ zIndex: (el.zIndex ?? defaultZ) + 1 })}
+              className={`text-xs px-2.5 py-1.5 rounded text-white flex items-center justify-center gap-1 ${kind === 'scripture' ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-amber-600 hover:bg-amber-500'}`}
+            >
+              <ArrowUp className="w-3 h-3" /> Forward
+            </button>
+          </div>
         </div>
       </div>
 
@@ -650,6 +888,258 @@ function ElementPanel({ el, kind, theme, onUpdate }: {
         <SectionHeader title="Visibility" />
         <Toggle label="Visible" checked={el.visible} onChange={v => onUpdate({ visible: v })} />
       </div>
+    </div>
+  );
+}
+
+function BoxPanel({
+  boxes,
+  activeBoxId,
+  onSelectBox,
+  onAddBox,
+  onUpdateBox,
+  onDeleteBox,
+  themeAssets,
+  onUploadAsset,
+  onRemoveAsset,
+}: {
+  boxes: ThemeBoxLayer[];
+  activeBoxId: string | null;
+  onSelectBox: (id: string) => void;
+  onAddBox: () => void;
+  onUpdateBox: (id: string, updates: Partial<ThemeBoxLayer>) => void;
+  onDeleteBox: (id: string) => void;
+  themeAssets: ThemeAsset[];
+  onUploadAsset: (file: File) => Promise<void>;
+  onRemoveAsset: (assetId: string) => void;
+}) {
+  const assetInputRef = useRef<HTMLInputElement | null>(null);
+  const activeBox = boxes.find((box) => box.id === activeBoxId) ?? null;
+  const selectedAsset = themeAssets.find((asset) => asset.dataUrl === (activeBox?.imageUrl || '')) ?? null;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <SectionHeader title="Box Layers" />
+        <div className="space-y-2.5">
+          <button
+            onClick={onAddBox}
+            className="w-full text-xs px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-1.5"
+          >
+            <Plus className="w-3.5 h-3.5" /> Add Box Layer
+          </button>
+          <div className="space-y-1.5 max-h-40 overflow-y-auto">
+            {boxes.length === 0 && (
+              <p className="text-xs text-zinc-500">No box layers yet. Add one to start.</p>
+            )}
+            {boxes.map((box, idx) => (
+              <button
+                key={box.id}
+                onClick={() => onSelectBox(box.id)}
+                className={`w-full px-2.5 py-1.5 rounded text-xs flex items-center justify-between border ${activeBoxId === box.id ? 'border-emerald-500/70 bg-emerald-900/20 text-emerald-200' : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-900'}`}
+              >
+                <span className="truncate">Box {idx + 1}</span>
+                <span className="text-[10px] text-zinc-500">z{box.zIndex}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {activeBox && (
+        <>
+          <div>
+            <SectionHeader title="Layer" />
+            <div className="space-y-2.5">
+              <NumberInput
+                label="Z Index"
+                value={activeBox.zIndex}
+                min={-100}
+                max={500}
+                step={1}
+                onChange={(v) => onUpdateBox(activeBox.id, { zIndex: v })}
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => onUpdateBox(activeBox.id, { zIndex: activeBox.zIndex - 1 })}
+                  className="text-xs px-2.5 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1"
+                >
+                  <ArrowDown className="w-3 h-3" /> Backward
+                </button>
+                <button
+                  onClick={() => onUpdateBox(activeBox.id, { zIndex: activeBox.zIndex + 1 })}
+                  className="text-xs px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-1"
+                >
+                  <ArrowUp className="w-3 h-3" /> Forward
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <SectionHeader title="Style" />
+            <div className="space-y-2.5">
+              <ColorPicker
+                label="Fill Color"
+                value={activeBox.fillColor}
+                onChange={(v) => onUpdateBox(activeBox.id, { fillColor: v })}
+              />
+              <SliderRow
+                label="Fill Opacity"
+                value={activeBox.fillOpacity}
+                min={0}
+                max={100}
+                format={(v) => `${v}%`}
+                onChange={(v) => onUpdateBox(activeBox.id, { fillOpacity: v })}
+              />
+              <NumberInput
+                label="Corner Radius"
+                value={activeBox.borderRadius}
+                min={0}
+                max={240}
+                step={1}
+                format="px"
+                onChange={(v) => onUpdateBox(activeBox.id, { borderRadius: v })}
+              />
+              <div>
+                <span className="text-xs text-zinc-400 block mb-1.5">Theme Asset (Image)</span>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <select
+                      value={selectedAsset?.id || ''}
+                      onChange={(e) => {
+                        const selected = themeAssets.find((asset) => asset.id === e.target.value);
+                        onUpdateBox(activeBox.id, { imageUrl: selected?.dataUrl || '' });
+                      }}
+                      className="flex-1 bg-zinc-950 border border-zinc-800 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                    >
+                      <option value="">No asset selected</option>
+                      {themeAssets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          {asset.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => assetInputRef.current?.click()}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs"
+                      title="Upload image asset"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      Upload
+                    </button>
+                  </div>
+                  <input
+                    ref={assetInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.currentTarget.value = '';
+                      if (!file) return;
+                      try {
+                        await onUploadAsset(file);
+                      } catch (error) {
+                        console.warn('[ThemeDesigner] Failed to upload asset:', error);
+                      }
+                    }}
+                  />
+
+                  {selectedAsset && (
+                    <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <ImageIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        <span className="text-[11px] text-zinc-300 truncate" title={selectedAsset.name}>
+                          {selectedAsset.name}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => onRemoveAsset(selectedAsset.id)}
+                        className="text-[10px] text-red-300 hover:text-red-200"
+                      >
+                        Remove Asset
+                      </button>
+                    </div>
+                  )}
+
+                  <div>
+                    <span className="text-xs text-zinc-400 block mb-1.5">Image URL (Optional)</span>
+                    <input
+                      type="text"
+                      value={activeBox.imageUrl || ''}
+                      onChange={(e) => onUpdateBox(activeBox.id, { imageUrl: e.target.value })}
+                      placeholder="https://... or pasted data URL"
+                      className="w-full bg-zinc-950 border border-zinc-800 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      onClick={() => onUpdateBox(activeBox.id, { imageUrl: '' })}
+                      className="text-xs text-zinc-500 hover:text-zinc-300 underline underline-offset-2 mt-1.5"
+                    >
+                      Clear image
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <SectionHeader title="Position" />
+            <div className="grid grid-cols-2 gap-2">
+              <NumberInput
+                label="X"
+                value={Math.round(activeBox.x)}
+                min={0}
+                max={95}
+                format="%"
+                onChange={(v) => onUpdateBox(activeBox.id, { x: v })}
+              />
+              <NumberInput
+                label="Y"
+                value={Math.round(activeBox.y)}
+                min={0}
+                max={95}
+                format="%"
+                onChange={(v) => onUpdateBox(activeBox.id, { y: v })}
+              />
+              <NumberInput
+                label="Width"
+                value={Math.round(activeBox.width)}
+                min={1}
+                max={100}
+                format="%"
+                onChange={(v) => onUpdateBox(activeBox.id, { width: v })}
+              />
+              <NumberInput
+                label="Height"
+                value={Math.round(activeBox.height)}
+                min={1}
+                max={100}
+                format="%"
+                onChange={(v) => onUpdateBox(activeBox.id, { height: v })}
+              />
+            </div>
+          </div>
+
+          <div>
+            <SectionHeader title="Visibility" />
+            <div className="space-y-2.5">
+              <Toggle
+                label="Visible"
+                checked={activeBox.visible}
+                onChange={(v) => onUpdateBox(activeBox.id, { visible: v })}
+              />
+              <button
+                onClick={() => onDeleteBox(activeBox.id)}
+                className="w-full text-xs px-3 py-2 rounded-lg bg-red-900/30 text-red-300 border border-red-500/40 hover:bg-red-900/45"
+              >
+                Delete Box
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -723,11 +1213,13 @@ interface ThemeDesignerProps { onClose: () => void; }
 export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
   const {
     themes, activeThemeId, addTheme, duplicateTheme, updateTheme, deleteTheme, setActiveTheme,
-    previewScripture, setLive,
+    previewScripture, goLiveWithTransition,
+    themeAssets, addThemeAsset, removeThemeAsset,
   } = useStore();
 
   const [sampleIdx, setSampleIdx] = useState(0);
   const [panelTab, setPanelTab] = useState<PanelTab>('scripture');
+  const [activeBoxId, setActiveBoxId] = useState<string | null>(null);
 
   // Auto-create default theme if empty
   useEffect(() => {
@@ -756,6 +1248,50 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
     updateTheme(activeTheme.id, { elements });
   }, [activeTheme, updateTheme]);
 
+  const upBoxes = useCallback((boxes: ThemeBoxLayer[]) => {
+    if (!activeTheme) return;
+    updateTheme(activeTheme.id, { elements: { ...activeTheme.elements, boxes } });
+  }, [activeTheme, updateTheme]);
+
+  const addBox = useCallback(() => {
+    if (!activeTheme) return;
+    const maxZ = Math.max(
+      activeTheme.elements.scripture.zIndex ?? (DEFAULT_ELEMENTS.scripture.zIndex ?? 20),
+      activeTheme.elements.reference.zIndex ?? (DEFAULT_ELEMENTS.reference.zIndex ?? 30),
+      ...(activeTheme.elements.boxes ?? []).map((box) => box.zIndex ?? 0),
+    );
+    const newBox: ThemeBoxLayer = {
+      id: crypto.randomUUID(),
+      x: 10,
+      y: 10,
+      width: 30,
+      height: 20,
+      visible: true,
+      zIndex: maxZ + 1,
+      fillColor: '#000000',
+      fillOpacity: 40,
+      borderRadius: 0,
+      imageUrl: '',
+    };
+    upBoxes([...(activeTheme.elements.boxes ?? []), newBox]);
+    setPanelTab('boxes');
+    setActiveBoxId(newBox.id);
+  }, [activeTheme, upBoxes]);
+
+  const updateBox = useCallback((boxId: string, updates: Partial<ThemeBoxLayer>) => {
+    if (!activeTheme) return;
+    upBoxes((activeTheme.elements.boxes ?? []).map((box) => (
+      box.id === boxId ? { ...box, ...updates } : box
+    )));
+  }, [activeTheme, upBoxes]);
+
+  const deleteBox = useCallback((boxId: string) => {
+    if (!activeTheme) return;
+    const next = (activeTheme.elements.boxes ?? []).filter((box) => box.id !== boxId);
+    upBoxes(next);
+    setActiveBoxId(next[0]?.id ?? null);
+  }, [activeTheme, upBoxes]);
+
   const applySnap = (preset: keyof typeof SNAP_PRESETS) => {
     if (!activeTheme) return;
     const p = SNAP_PRESETS[preset];
@@ -763,13 +1299,36 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
       elements: {
         scripture: { ...activeTheme.elements.scripture, ...p.scripture },
         reference: { ...activeTheme.elements.reference, ...p.reference },
+        boxes: activeTheme.elements.boxes ?? [],
       },
     });
   };
 
+  useEffect(() => {
+    if (!activeTheme || panelTab !== 'boxes') return;
+    const boxes = activeTheme.elements.boxes ?? [];
+    if (boxes.length === 0) {
+      setActiveBoxId(null);
+      return;
+    }
+    if (!activeBoxId || !boxes.some((box) => box.id === activeBoxId)) {
+      setActiveBoxId(boxes[0].id);
+    }
+  }, [activeTheme, panelTab, activeBoxId]);
+
   const sampleVerse = previewScripture
     ? { text: previewScripture.text, reference: `${previewScripture.book} ${previewScripture.chapter}:${previewScripture.verse}`, version: previewScripture.version }
     : SAMPLE_VERSES[sampleIdx];
+
+  const uploadThemeAsset = useCallback(async (file: File) => {
+    const dataUrl = await fileToDataUrl(file);
+    addThemeAsset({
+      name: file.name,
+      type: 'image',
+      dataUrl,
+      mimeType: file.type || 'application/octet-stream',
+    });
+  }, [addThemeAsset]);
 
   if (!activeTheme) return null;
   const ps = activeTheme.settings;
@@ -782,11 +1341,11 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
           <div className="p-1.5 bg-indigo-600/20 rounded-lg"><Layers className="w-4 h-4 text-indigo-400" /></div>
           <h2 className="text-sm font-semibold text-white">Theme Designer</h2>
           <span className="text-xs text-zinc-600 hidden sm:block">
-            Drag <span className="text-indigo-400">Scripture</span> &amp; <span className="text-amber-400">Reference</span> · click to edit styles
+            Drag <span className="text-indigo-400">Scripture</span> &amp; <span className="text-amber-400">Reference</span> and stack color/image box layers
           </span>
         </div>
         <div className="flex items-center space-x-2">
-          <button onClick={() => { if (previewScripture) setLive(previewScripture); }} disabled={!previewScripture}
+          <button onClick={() => { if (previewScripture) goLiveWithTransition(previewScripture); }} disabled={!previewScripture}
             className="flex items-center space-x-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-medium rounded-lg transition-colors">
             <Zap className="w-3.5 h-3.5" /><span>Apply to Live</span>
           </button>
@@ -834,6 +1393,12 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
               ))}
             </div>
             <div className="flex items-center gap-3">
+              <button
+                onClick={addBox}
+                className="flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors text-emerald-300 bg-emerald-900/30 hover:bg-emerald-800/40"
+              >
+                <Square className="w-3 h-3" /> Add Box
+              </button>
               <button onClick={() => { upEl('scripture', { visible: !activeTheme.elements.scripture.visible }); }}
                 className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors ${activeTheme.elements.scripture.visible ? 'text-indigo-300 bg-indigo-900/30' : 'text-zinc-500 bg-zinc-800'}`}>
                 {activeTheme.elements.scripture.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />} Scripture
@@ -842,6 +1407,9 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
                 className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors ${activeTheme.elements.reference.visible ? 'text-amber-300 bg-amber-900/30' : 'text-zinc-500 bg-zinc-800'}`}>
                 {activeTheme.elements.reference.visible ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />} Reference
               </button>
+              <span className="text-xs text-emerald-400">
+                {(activeTheme.elements.boxes ?? []).length} box layer{(activeTheme.elements.boxes ?? []).length === 1 ? '' : 's'}
+              </span>
               <span className="text-xs text-zinc-600 flex items-center gap-1"><Monitor className="w-3 h-3" /> 1920×1080</span>
             </div>
           </div>
@@ -852,8 +1420,13 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
               <DragCanvas
                 theme={activeTheme}
                 sampleVerse={sampleVerse}
-                selectedElement={panelTab === 'background' ? null : panelTab}
+                selectedElement={panelTab === 'scripture' || panelTab === 'reference' ? panelTab : null}
+                activeBoxId={activeBoxId}
                 onSelectElement={el => { if (el) setPanelTab(el); }}
+                onSelectBox={(boxId) => {
+                  setActiveBoxId(boxId);
+                  if (boxId) setPanelTab('boxes');
+                }}
                 onElementsChange={upElements}
               />
             </div>
@@ -875,6 +1448,11 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
                 {activeTheme.elements.reference.height !== undefined ? ` · ${Math.round(activeTheme.elements.reference.height)}% tall` : ''}
                 {activeTheme.elements.reference.autoFontSize ? ' · auto-size' : ''}
                 {' · '}{activeTheme.elements.reference.fontSize ?? 32}px
+              </span>
+              <span className="text-emerald-400 cursor-pointer hover:text-emerald-300" onClick={() => setPanelTab('boxes')}>
+                <span className="inline-block w-2 h-2 rounded-sm bg-emerald-500 mr-1.5" />
+                Boxes: {(activeTheme.elements.boxes ?? []).length}
+                {activeBoxId ? ` · selected ${Math.max(1, (activeTheme.elements.boxes ?? []).findIndex((b) => b.id === activeBoxId) + 1)}` : ''}
               </span>
             </div>
 
@@ -902,6 +1480,7 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
             {([
               { id: 'scripture', label: 'Scripture', color: 'text-indigo-400' },
               { id: 'reference', label: 'Reference', color: 'text-amber-400' },
+              { id: 'boxes', label: 'Boxes', color: 'text-emerald-400' },
               { id: 'background', label: 'BG & FX', color: 'text-zinc-400' },
             ] as const).map(tab => (
               <button key={tab.id} onClick={() => setPanelTab(tab.id)}
@@ -920,6 +1499,19 @@ export default function ThemeDesigner({ onClose }: ThemeDesignerProps) {
             {panelTab === 'reference' && (
               <ElementPanel el={activeTheme.elements.reference} kind="reference" theme={activeTheme}
                 onUpdate={u => upEl('reference', u)} />
+            )}
+            {panelTab === 'boxes' && (
+              <BoxPanel
+                boxes={activeTheme.elements.boxes ?? []}
+                activeBoxId={activeBoxId}
+                onSelectBox={(id) => setActiveBoxId(id)}
+                onAddBox={addBox}
+                onUpdateBox={updateBox}
+                onDeleteBox={deleteBox}
+                themeAssets={themeAssets.filter((asset) => asset.type === 'image')}
+                onUploadAsset={uploadThemeAsset}
+                onRemoveAsset={removeThemeAsset}
+              />
             )}
             {panelTab === 'background' && (
               <BackgroundPanel ps={ps} up={up} />

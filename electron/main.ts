@@ -99,6 +99,14 @@ type RemoteRuntimeState = {
   updatedAt: number;
 };
 
+type RemoteClientInfo = {
+  id: string;
+  ip: string;
+  userAgent: string;
+  lastSeenAt: number;
+  lastCommandAt?: number;
+};
+
 let remoteControlConfig: RemoteControlConfig = {
   enabled: false,
   port: 4217,
@@ -116,10 +124,75 @@ let remoteRuntimeState: RemoteRuntimeState = {
   queueCount: 0,
   updatedAt: Date.now(),
 };
+const remoteClients = new Map<string, RemoteClientInfo>();
+const remoteSSEClients = new Set<Response>();
+const remoteRateWindow = new Map<string, { count: number; windowStart: number }>();
+let remoteLastCommandAt: number | null = null;
+let remoteCommandCount = 0;
+
+function getRemoteClientId(req: Request): string {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown-ip';
+  const ua = String(req.header('user-agent') || 'unknown-agent');
+  return `${ip}::${ua}`;
+}
+
+function touchRemoteClient(req: Request, command = false): void {
+  const id = getRemoteClientId(req);
+  const now = Date.now();
+  const existing = remoteClients.get(id);
+  const info: RemoteClientInfo = existing ? {
+    ...existing,
+    lastSeenAt: now,
+    lastCommandAt: command ? now : existing.lastCommandAt,
+  } : {
+    id,
+    ip: req.ip || req.socket.remoteAddress || 'unknown-ip',
+    userAgent: String(req.header('user-agent') || 'unknown-agent'),
+    lastSeenAt: now,
+    lastCommandAt: command ? now : undefined,
+  };
+  remoteClients.set(id, info);
+  if (command) {
+    remoteLastCommandAt = now;
+    remoteCommandCount += 1;
+  }
+}
+
+function isRemoteRateLimited(req: Request): boolean {
+  const id = getRemoteClientId(req);
+  const now = Date.now();
+  const current = remoteRateWindow.get(id);
+  if (!current || now - current.windowStart > 1000) {
+    remoteRateWindow.set(id, { count: 1, windowStart: now });
+    return false;
+  }
+  current.count += 1;
+  remoteRateWindow.set(id, current);
+  return current.count > 25;
+}
+
+function cleanupRemoteClientState(): void {
+  const cutoff = Date.now() - 60_000;
+  for (const [key, client] of remoteClients.entries()) {
+    if (client.lastSeenAt < cutoff) remoteClients.delete(key);
+  }
+}
+
+function broadcastRemoteState(): void {
+  if (remoteSSEClients.size === 0) return;
+  const payload = JSON.stringify({ state: remoteRuntimeState, ts: Date.now() });
+  for (const res of Array.from(remoteSSEClients)) {
+    try {
+      res.write(`event: state\n`);
+      res.write(`data: ${payload}\n\n`);
+    } catch {
+      remoteSSEClients.delete(res);
+    }
+  }
+}
 
 function getRemoteUrls(port: number): string[] {
   const urls = new Set<string>();
-  urls.add(`http://localhost:${port}`);
 
   const interfaces = os.networkInterfaces();
   for (const iface of Object.values(interfaces)) {
@@ -154,12 +227,16 @@ function isRemoteAuthorized(req: Request): boolean {
 }
 
 function buildRemoteStatus() {
+  cleanupRemoteClientState();
   return {
     running: Boolean(remoteControlServer),
     enabled: remoteControlConfig.enabled,
     port: remoteControlConfig.port,
     tokenSet: Boolean(remoteControlConfig.token),
     urls: getRemoteUrls(remoteControlConfig.port),
+    connectedClients: remoteClients.size,
+    lastCommandAt: remoteLastCommandAt ?? undefined,
+    commandCount: remoteCommandCount,
     error: remoteControlError ?? undefined,
     state: remoteRuntimeState,
   };
@@ -195,6 +272,7 @@ function buildRemoteControlPage(): string {
         <p class="title">ScriptureFlow Remote</p>
         <p class="muted">Control preview/live and queue from phone or laptop.</p>
         <input id="token" placeholder="Access token (leave empty if remote has no token)" />
+        <p id="authMsg" class="muted"></p>
       </div>
       <div class="card">
         <p class="title">Live Controls</p>
@@ -233,18 +311,53 @@ function buildRemoteControlPage(): string {
       </div>
     </div>
     <script>
+      let stateStream = null;
+      let tokenRequired = false;
+
       function authHeaders() {
         const token = document.getElementById('token').value.trim();
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers['x-scriptureflow-token'] = token;
         return headers;
       }
+      function readTokenFromUrl() {
+        try {
+          const params = new URLSearchParams(window.location.search || '');
+          return (params.get('token') || '').trim();
+        } catch {
+          return '';
+        }
+      }
+      function setAuthMsg(text) {
+        const el = document.getElementById('authMsg');
+        if (!el) return;
+        el.textContent = text || '';
+      }
+      function getToken() {
+        return document.getElementById('token').value.trim();
+      }
+      async function loadPublicConfig() {
+        try {
+          const res = await fetch('/api/public-config');
+          if (!res.ok) return;
+          const data = await res.json();
+          tokenRequired = Boolean(data?.tokenRequired);
+        } catch {}
+      }
       async function act(type, payload) {
-        await fetch('/api/action', {
+        if (tokenRequired && !getToken()) {
+          setAuthMsg('Authentication required. Enter access token.');
+          return;
+        }
+        const res = await fetch('/api/action', {
           method: 'POST',
           headers: authHeaders(),
           body: JSON.stringify({ type, payload: payload || {} }),
         });
+        if (res.status === 401) {
+          setAuthMsg('Unauthorized: enter the correct access token.');
+          return;
+        }
         await refreshState();
       }
       async function setPreviewRef() {
@@ -254,11 +367,7 @@ function buildRemoteControlPage(): string {
         if (!book || !Number.isFinite(chapter) || !Number.isFinite(verse)) return;
         await act('setPreviewReference', { book, chapter, verse });
       }
-      async function refreshState() {
-        const res = await fetch('/api/state', { headers: authHeaders() });
-        if (!res.ok) return;
-        const data = await res.json();
-        const s = data.state || {};
+      function renderState(s) {
         document.getElementById('state').innerHTML =
           '<div class=\"muted\">Mode</div><div>' + (s.mode || '-') + '</div>' +
           '<div class=\"muted\">Auto Paused</div><div>' + (s.isAutoPaused ? 'Yes' : 'No') + '</div>' +
@@ -267,14 +376,78 @@ function buildRemoteControlPage(): string {
           '<div class=\"muted\">Live</div><div class=\"mono\">' + (s.liveReference || '-') + '</div>' +
           '<div class=\"muted\">Queue</div><div>' + (s.queueCount ?? 0) + '</div>';
       }
-      refreshState();
-      setInterval(refreshState, 1200);
+      async function refreshState() {
+        if (tokenRequired && !getToken()) {
+          setAuthMsg('Authentication required. Enter access token.');
+          return false;
+        }
+        const res = await fetch('/api/state', { headers: authHeaders() });
+        if (res.status === 401) {
+          setAuthMsg('Unauthorized: enter the correct access token.');
+          return false;
+        }
+        if (!res.ok) return false;
+        setAuthMsg('');
+        const data = await res.json();
+        renderState(data.state || {});
+        return true;
+      }
+      function connectStateStream() {
+        if (stateStream) {
+          try { stateStream.close(); } catch {}
+          stateStream = null;
+        }
+        const token = getToken();
+        if (tokenRequired && !token) return;
+        const url = token ? ('/api/events?token=' + encodeURIComponent(token)) : '/api/events';
+        try {
+          const es = new EventSource(url);
+          stateStream = es;
+          es.addEventListener('state', (ev) => {
+            try {
+              const payload = JSON.parse(ev.data);
+              if (payload && payload.state) renderState(payload.state);
+            } catch {}
+          });
+          es.onerror = () => {
+            try { es.close(); } catch {}
+            stateStream = null;
+            if (tokenRequired && !getToken()) return;
+            setTimeout(connectStateStream, 1500);
+          };
+        } catch {}
+      }
+      const tokenInput = document.getElementById('token');
+      tokenInput.value = readTokenFromUrl();
+      tokenInput.addEventListener('change', () => {
+        connectStateStream();
+        refreshState();
+      });
+      tokenInput.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        connectStateStream();
+        refreshState();
+      });
+      loadPublicConfig().then(async () => {
+        if (tokenRequired && !getToken()) {
+          setAuthMsg('Authentication required. Enter access token.');
+          return;
+        }
+        connectStateStream();
+        await refreshState();
+      });
+      setInterval(refreshState, 5000);
     </script>
   </body>
 </html>`;
 }
 
 async function stopRemoteControlServer(): Promise<void> {
+  for (const res of Array.from(remoteSSEClients)) {
+    try { res.end(); } catch { /* ignore */ }
+  }
+  remoteSSEClients.clear();
   if (!remoteControlServer) return;
   await new Promise<void>((resolve) => {
     remoteControlServer?.close(() => resolve());
@@ -293,12 +466,42 @@ async function startRemoteControlServer(): Promise<void> {
     res.json({ ok: true });
   });
 
+  appServer.get('/api/public-config', (_req, res) => {
+    res.json({
+      ok: true,
+      tokenRequired: Boolean(remoteControlConfig.token),
+    });
+  });
+
   appServer.get('/api/state', (req, res) => {
     if (!isRemoteAuthorized(req)) {
       res.status(401).json({ ok: false, error: 'Unauthorized' });
       return;
     }
+    touchRemoteClient(req, false);
     res.json({ ok: true, state: remoteRuntimeState, version: app.getVersion() });
+  });
+
+  appServer.get('/api/events', (req, res) => {
+    if (!isRemoteAuthorized(req)) {
+      res.status(401).end();
+      return;
+    }
+    touchRemoteClient(req, false);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    remoteSSEClients.add(res);
+    const payload = JSON.stringify({ state: remoteRuntimeState, ts: Date.now() });
+    res.write(`event: state\n`);
+    res.write(`data: ${payload}\n\n`);
+
+    req.on('close', () => {
+      remoteSSEClients.delete(res);
+    });
   });
 
   appServer.post('/api/action', (req, res) => {
@@ -306,6 +509,11 @@ async function startRemoteControlServer(): Promise<void> {
       res.status(401).json({ ok: false, error: 'Unauthorized' });
       return;
     }
+    if (isRemoteRateLimited(req)) {
+      res.status(429).json({ ok: false, error: 'Too many requests. Slow down.' });
+      return;
+    }
+    touchRemoteClient(req, true);
 
     const type = String(req.body?.type || '').trim();
     const payload = req.body?.payload ?? {};
@@ -330,14 +538,11 @@ async function startRemoteControlServer(): Promise<void> {
       return;
     }
     mainWindow.webContents.send('remote-command', { type, payload });
+    broadcastRemoteState();
     res.json({ ok: true });
   });
 
   appServer.get('/', (req: Request, res: Response) => {
-    if (!isRemoteAuthorized(req)) {
-      res.status(401).send('Unauthorized');
-      return;
-    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildRemoteControlPage());
   });
@@ -414,6 +619,25 @@ type NDISession = {
   sourceName: string;
   sender: any;
   repaintTimer: ReturnType<typeof setInterval> | null;
+  startedAt: number;
+  frameCount: number;
+  frameErrors: number;
+  lastFrameAt: number | null;
+  rollingFps: number;
+};
+
+type NDIDiagnosticsRow = {
+  targetId: string;
+  sourceName: string;
+  active: boolean;
+  startedAt: number;
+  uptimeMs: number;
+  frameCount: number;
+  frameErrors: number;
+  fps: number;
+  lastFrameAt: number | null;
+  runtimeDetected: boolean;
+  runtimePath?: string;
 };
 
 const ndiSessions = new Map<string, NDISession>();
@@ -636,6 +860,11 @@ function startNDI(sourceName: string, targetId?: string): { ok: boolean; error?:
     sourceName,
     sender,
     repaintTimer: null,
+    startedAt: Date.now(),
+    frameCount: 0,
+    frameErrors: 0,
+    lastFrameAt: null,
+    rollingFps: 0,
   };
 
   const offscreenWin = new BrowserWindow({
@@ -660,6 +889,17 @@ function startNDI(sourceName: string, targetId?: string): { ok: boolean; error?:
     const size = image.getSize();
     if (size.width === 0 || size.height === 0) return;
     const frameData = image.toBitmap();
+    const now = Date.now();
+    if (sessionState.lastFrameAt) {
+      const delta = now - sessionState.lastFrameAt;
+      if (delta > 0) {
+        const instant = 1000 / delta;
+        sessionState.rollingFps = sessionState.rollingFps === 0
+          ? instant
+          : (sessionState.rollingFps * 0.85) + (instant * 0.15);
+      }
+    }
+    sessionState.lastFrameAt = now;
     try {
       sessionState.sender.video({
         xres: size.width,
@@ -671,7 +911,11 @@ function startNDI(sourceName: string, targetId?: string): { ok: boolean; error?:
         data: frameData,
         timecode: grandiose.SEND_TIMECODE_SYNTHESIZE ?? BigInt(0),
       });
-    } catch { /* ignore individual frame errors */ }
+      sessionState.frameCount += 1;
+    } catch {
+      sessionState.frameErrors += 1;
+      /* ignore individual frame errors */
+    }
   });
 
   offscreenWin.webContents.startPainting();
@@ -762,6 +1006,50 @@ function getNDIStatus(targetId?: string): NDIStatus {
   }
 
   return { status: 'stopped', activeCount: 0 };
+}
+
+function getNDIDiagnostics(targetId?: string): {
+  rows: NDIDiagnosticsRow[];
+  summary: {
+    activeCount: number;
+    runtimeDetected: boolean;
+    runtimePath?: string;
+    checkedAt: number;
+  };
+} {
+  const runtimePath = findInstalledNDIRuntimeDll() ?? undefined;
+  const runtimeDetected = Boolean(runtimePath);
+  const rows = Array.from(ndiSessions.values())
+    .filter((session) => {
+      if (!targetId || !targetId.trim()) return true;
+      return session.targetId === normalizeNDITargetId(targetId);
+    })
+    .map((session) => {
+      const uptimeMs = Date.now() - session.startedAt;
+      return {
+        targetId: session.targetId,
+        sourceName: session.sourceName,
+        active: true,
+        startedAt: session.startedAt,
+        uptimeMs,
+        frameCount: session.frameCount,
+        frameErrors: session.frameErrors,
+        fps: Math.max(0, Number(session.rollingFps.toFixed(2))),
+        lastFrameAt: session.lastFrameAt,
+        runtimeDetected,
+        runtimePath,
+      } satisfies NDIDiagnosticsRow;
+    });
+
+  return {
+    rows,
+    summary: {
+      activeCount: rows.length,
+      runtimeDetected,
+      runtimePath,
+      checkedAt: Date.now(),
+    },
+  };
 }
 
 // ── Window helpers ─────────────────────────────────────────────────
@@ -1120,6 +1408,7 @@ ipcMain.on('remote-control-state-sync', (_event, payload: Partial<RemoteRuntimeS
     ...payload,
     updatedAt: Date.now(),
   };
+  broadcastRemoteState();
 });
 
 ipcMain.on('open-live-window', (event, { windowId = 'main', displayId }: { windowId?: string; displayId?: string }) => {
@@ -1291,6 +1580,10 @@ function registerRealtimeHandlers(): void {
 
 ipcMain.handle('ndi-get-status', (_event, payload?: { targetId?: string }) => {
   return getNDIStatus(payload?.targetId);
+});
+
+ipcMain.handle('ndi-get-diagnostics', (_event, payload?: { targetId?: string }) => {
+  return getNDIDiagnostics(payload?.targetId);
 });
 
 // ── IPC: Deepgram WebSocket bridge ─────────────────────────────────────────────

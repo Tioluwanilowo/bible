@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
   X, RefreshCw, Monitor, Mic, Tv, Cpu, Plus, Trash2,
-  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound, Smartphone, UserPlus, Save, Copy,
+  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound, Smartphone, UserPlus, Save, Copy, QrCode,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { AudioInputManager } from '../lib/audioManager';
+import QRCode from 'qrcode';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -21,12 +22,29 @@ type NDIHealthSnapshot = {
   checkedAt: number;
 };
 
+type NDIDiagnosticsSnapshot = {
+  targetId: string;
+  sourceName: string;
+  active: boolean;
+  startedAt: number;
+  uptimeMs: number;
+  frameCount: number;
+  frameErrors: number;
+  fps: number;
+  lastFrameAt: number | null;
+  runtimeDetected: boolean;
+  runtimePath?: string;
+};
+
 type RemoteControlStatus = {
   running: boolean;
   enabled: boolean;
   port: number;
   tokenSet: boolean;
   urls: string[];
+  connectedClients?: number;
+  lastCommandAt?: number;
+  commandCount?: number;
   error?: string;
   state?: {
     mode?: 'auto' | 'manual';
@@ -47,6 +65,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     themes, outputTargets, addOutputTarget, addNDITarget, removeOutputTarget, updateOutputTarget,
     voiceProfiles, activeVoiceProfileId, addVoiceProfileFromCurrent,
     updateVoiceProfileFromCurrent, removeVoiceProfile, setActiveVoiceProfile,
+    userProfiles, activeUserProfileId, createUserProfile, renameUserProfile, deleteUserProfile, setActiveUserProfile,
   } = useStore();
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -58,15 +77,20 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [showDeepgramKey, setShowDeepgramKey] = useState(false);
   const [showRemoteToken, setShowRemoteToken] = useState(false);
   const [newVoiceProfileName, setNewVoiceProfileName] = useState('');
+  const [newUserProfileName, setNewUserProfileName] = useState('');
+  const [editingUserProfileName, setEditingUserProfileName] = useState('');
   const [remoteStatus, setRemoteStatus] = useState<RemoteControlStatus | null>(null);
   const [isRefreshingRemoteStatus, setIsRefreshingRemoteStatus] = useState(false);
   const [copiedRemoteUrl, setCopiedRemoteUrl] = useState('');
+  const [remoteQrDataUrl, setRemoteQrDataUrl] = useState('');
 
   // NDI channel controls (Outputs & Display tab — per-target NDI)
   const [ndiActiveTargets, setNdiActiveTargets] = useState<Record<string, boolean>>({});
   const [ndiTargetWorking, setNdiTargetWorking] = useState<string | null>(null);
   const [ndiErrors, setNdiErrors] = useState<Record<string, string>>({});
   const [ndiHealthByTarget, setNdiHealthByTarget] = useState<Record<string, NDIHealthSnapshot>>({});
+  const [ndiDiagnosticsByTarget, setNdiDiagnosticsByTarget] = useState<Record<string, NDIDiagnosticsSnapshot>>({});
+  const [ndiRuntimePath, setNdiRuntimePath] = useState<string>('');
 
   const loadDevices = async () => {
     setIsRefreshing(true);
@@ -76,6 +100,17 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   };
 
   const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === activeVoiceProfileId) ?? null;
+  const activeUserProfile = userProfiles.find((profile) => profile.id === activeUserProfileId) ?? null;
+  const remoteNetworkUrls = (remoteStatus?.urls ?? []).filter((url) => {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+    } catch {
+      return !url.includes('localhost');
+    }
+  });
+  const primaryRemoteUrl = remoteNetworkUrls[0] ?? '';
+  const qrRemoteUrl = primaryRemoteUrl;
 
   const updateRemoteControl = (updates: Partial<typeof settings.remoteControl>) => {
     updateSettings({
@@ -112,6 +147,33 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
   useEffect(() => { loadDevices(); }, []);
   useEffect(() => { refreshRemoteStatus(); }, [settings.remoteControl]);
+  useEffect(() => {
+    if (!qrRemoteUrl) {
+      setRemoteQrDataUrl('');
+      return;
+    }
+    let cancelled = false;
+    QRCode.toDataURL(qrRemoteUrl, {
+      margin: 1,
+      width: 220,
+      color: {
+        dark: '#111827',
+        light: '#00000000',
+      },
+    })
+      .then((dataUrl) => {
+        if (!cancelled) setRemoteQrDataUrl(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setRemoteQrDataUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [qrRemoteUrl]);
+  useEffect(() => {
+    setEditingUserProfileName(activeUserProfile?.name ?? '');
+  }, [activeUserProfileId, userProfiles]);
 
   const refreshDisplays = () => {
     window.electronAPI?.getDisplays().then(displays => {
@@ -124,6 +186,8 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
     if (ndiTargets.length === 0) {
       setNdiActiveTargets({});
       setNdiHealthByTarget({});
+      setNdiDiagnosticsByTarget({});
+      setNdiRuntimePath('');
       return;
     }
 
@@ -154,6 +218,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         }),
       );
 
+      let diagnostics:
+        | { rows: NDIDiagnosticsSnapshot[]; summary: { runtimePath?: string } }
+        | null
+        | undefined = null;
+      try {
+        diagnostics = await window.electronAPI?.ndiGetDiagnostics?.();
+      } catch {
+        diagnostics = null;
+      }
+
       if (cancelled) return;
 
       const nextActive: Record<string, boolean> = {};
@@ -177,6 +251,13 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       setNdiActiveTargets(nextActive);
       setNdiHealthByTarget(nextHealth);
       setNdiErrors(prev => ({ ...prev, ...nextErrors }));
+
+      const nextDiagByTarget: Record<string, NDIDiagnosticsSnapshot> = {};
+      (diagnostics?.rows ?? []).forEach((row) => {
+        nextDiagByTarget[row.targetId] = row;
+      });
+      setNdiDiagnosticsByTarget(nextDiagByTarget);
+      setNdiRuntimePath(diagnostics?.summary?.runtimePath ?? '');
     };
 
     refreshNDIHealth();
@@ -251,6 +332,89 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           {/* ── Audio & Transcription ─────────────────────────────── */}
           {activeTab === 'audio' && (
             <div className="space-y-6">
+              <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">Operator Profiles</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Switch between saved setup presets for different operators or services.
+                    </p>
+                  </div>
+                  <span className="text-[10px] px-2 py-1 rounded bg-indigo-500/15 text-indigo-300">
+                    {userProfiles.length} profile{userProfiles.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Active Profile</label>
+                    <select
+                      value={activeUserProfileId ?? ''}
+                      onChange={(e) => setActiveUserProfile(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                    >
+                      {userProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Rename Active Profile</label>
+                    <input
+                      type="text"
+                      value={editingUserProfileName}
+                      onChange={(e) => setEditingUserProfileName(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                      placeholder="Profile name"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => {
+                      if (!activeUserProfileId) return;
+                      renameUserProfile(activeUserProfileId, editingUserProfileName);
+                    }}
+                    disabled={!activeUserProfileId || !editingUserProfileName.trim()}
+                    className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      createUserProfile(newUserProfileName);
+                      setNewUserProfileName('');
+                    }}
+                    className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center justify-center gap-1"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    New From Current
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!activeUserProfileId) return;
+                      deleteUserProfile(activeUserProfileId);
+                    }}
+                    disabled={!activeUserProfileId || userProfiles.length <= 1}
+                    className="px-3 py-2 text-xs rounded-lg border border-red-900/60 text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Delete
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  value={newUserProfileName}
+                  onChange={(e) => setNewUserProfileName(e.target.value)}
+                  placeholder="New profile name (optional)"
+                  className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <label className="block text-sm font-medium text-zinc-400">Audio Input Device</label>
@@ -785,10 +949,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                   const isNDI = target.type === 'ndi';
                   const ndiStreaming = Boolean(ndiActiveTargets[target.id]);
                   const ndiHealth = ndiHealthByTarget[target.id];
+                  const ndiDiagnostics = ndiDiagnosticsByTarget[target.id];
                   const ndiStatus = ndiHealth?.status ?? (ndiStreaming ? 'active' : 'stopped');
                   const ndiLastChecked = ndiHealth?.checkedAt
                     ? new Date(ndiHealth.checkedAt).toLocaleTimeString()
                     : 'Pending';
+                  const ndiUptimeSec = ndiDiagnostics ? Math.max(0, Math.round(ndiDiagnostics.uptimeMs / 1000)) : 0;
 
                   return (
                     <div key={target.id} className={`rounded-xl border p-4 space-y-3 transition-colors ${target.enabled ? (isNDI ? 'bg-zinc-950 border-emerald-900/40' : 'bg-zinc-950 border-zinc-700') : 'bg-zinc-900/50 border-zinc-800 opacity-60'}`}>
@@ -920,12 +1086,24 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                             <div className="grid grid-cols-2 gap-2 text-[10px]">
                               <p className="text-zinc-500">Active Sources</p>
                               <p className="text-zinc-300 text-right">{ndiHealth?.activeCount ?? (ndiStreaming ? 1 : 0)}</p>
+                              <p className="text-zinc-500">FPS</p>
+                              <p className="text-zinc-300 text-right">{ndiDiagnostics ? ndiDiagnostics.fps.toFixed(1) : '-'}</p>
+                              <p className="text-zinc-500">Frames Sent</p>
+                              <p className="text-zinc-300 text-right">{ndiDiagnostics?.frameCount ?? '-'}</p>
+                              <p className="text-zinc-500">Frame Errors</p>
+                              <p className="text-zinc-300 text-right">{ndiDiagnostics?.frameErrors ?? '-'}</p>
+                              <p className="text-zinc-500">Uptime</p>
+                              <p className="text-zinc-300 text-right">{ndiDiagnostics ? `${ndiUptimeSec}s` : '-'}</p>
                               <p className="text-zinc-500">Runtime Source</p>
                               <p
                                 className="text-zinc-300 text-right truncate"
                                 title={ndiHealth?.sourceName || target.ndiSourceName || 'ScriptureFlow'}
                               >
                                 {ndiHealth?.sourceName || target.ndiSourceName || 'ScriptureFlow'}
+                              </p>
+                              <p className="text-zinc-500">Runtime Path</p>
+                              <p className="text-zinc-300 text-right truncate" title={ndiDiagnostics?.runtimePath || ndiRuntimePath || '-'}>
+                                {ndiDiagnostics?.runtimePath || ndiRuntimePath || '-'}
                               </p>
                               <p className="text-zinc-500">Last Check</p>
                               <p className="text-zinc-300 text-right">{ndiLastChecked}</p>
@@ -1243,6 +1421,9 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                       Mode: {remoteStatus.state.mode}
                     </span>
                   )}
+                  <span className="px-2 py-1 rounded bg-zinc-800 text-zinc-300">
+                    Clients: {remoteStatus?.connectedClients ?? 0}
+                  </span>
                 </div>
 
                 {remoteStatus?.error && (
@@ -1263,11 +1444,19 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                     <span className="text-zinc-200 text-right">{remoteStatus.state.queueCount ?? 0}</span>
                     <span className="text-zinc-500">Auto Paused</span>
                     <span className="text-zinc-200 text-right">{remoteStatus.state.isAutoPaused ? 'Yes' : 'No'}</span>
+                    <span className="text-zinc-500">Connected Clients</span>
+                    <span className="text-zinc-200 text-right">{remoteStatus.connectedClients ?? 0}</span>
+                    <span className="text-zinc-500">Commands Seen</span>
+                    <span className="text-zinc-200 text-right">{remoteStatus.commandCount ?? 0}</span>
+                    <span className="text-zinc-500">Last Command</span>
+                    <span className="text-zinc-200 text-right">
+                      {remoteStatus.lastCommandAt ? new Date(remoteStatus.lastCommandAt).toLocaleTimeString() : '-'}
+                    </span>
                   </div>
                 )}
 
                 <div className="space-y-2">
-                  {(remoteStatus?.urls ?? []).map((url) => (
+                  {remoteNetworkUrls.map((url) => (
                     <div key={url} className="flex items-center gap-2">
                       <button
                         onClick={() => window.electronAPI?.openExternal?.(url)}
@@ -1293,7 +1482,35 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                       </button>
                     </div>
                   ))}
+                  {remoteNetworkUrls.length === 0 && (
+                    <p className="text-[11px] text-amber-400">
+                      No LAN IP detected yet. Connect to Wi-Fi/Ethernet, then click Refresh Status.
+                    </p>
+                  )}
                 </div>
+
+                {primaryRemoteUrl && remoteQrDataUrl && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <QrCode className="w-3.5 h-3.5 text-indigo-400" />
+                      <p className="text-[11px] text-zinc-300 font-medium">Scan QR to open Remote Control</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={remoteQrDataUrl}
+                        alt="Remote access QR code"
+                        className="w-28 h-28 rounded bg-white p-1 border border-zinc-700"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-[10px] text-zinc-500 mb-1">Target URL</p>
+                        <p className="text-[11px] text-indigo-300 break-all">{qrRemoteUrl}</p>
+                        <p className="text-[10px] text-zinc-500 mt-2">
+                          Ask the operator to scan this code on the same local network.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {copiedRemoteUrl && (
                   <p className="text-[10px] text-emerald-400">Copied: {copiedRemoteUrl}</p>

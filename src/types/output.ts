@@ -1,3 +1,5 @@
+import type { ThemeElements } from './index';
+
 export type ProviderStatus = 'initializing' | 'ready' | 'active' | 'error' | 'unavailable' | 'disabled';
 
 export interface OutputPayload {
@@ -30,26 +32,7 @@ export interface OutputPayload {
     version: boolean;
   };
   /** Per-element absolute positions + style overrides (used when layout === 'custom') */
-  elements?: {
-    scripture: {
-      x: number; y: number; width: number; visible: boolean;
-      height?: number; autoWidth?: boolean; autoFontSize?: boolean;
-      fontFamily?: 'serif' | 'sans' | 'mono';
-      fontSize?: number;
-      textColor?: string;
-      textAlignment?: 'left' | 'center' | 'right' | 'justify';
-      verticalAlignment?: 'top' | 'middle' | 'bottom';
-    };
-    reference: {
-      x: number; y: number; width: number; visible: boolean;
-      height?: number; autoWidth?: boolean; autoFontSize?: boolean;
-      fontFamily?: 'serif' | 'sans' | 'mono';
-      fontSize?: number;
-      textColor?: string;
-      textAlignment?: 'left' | 'center' | 'right' | 'justify';
-      verticalAlignment?: 'top' | 'middle' | 'bottom';
-    };
-  };
+  elements?: ThemeElements;
 }
 
 export interface OutputProvider {

@@ -1,5 +1,5 @@
-import React from 'react';
-import { ListOrdered, Eye, Send, Trash2, Plus } from 'lucide-react';
+import React, { useEffect } from 'react';
+import { ListOrdered, Eye, Send, Trash2, Plus, Timer } from 'lucide-react';
 import { useStore } from '../store/useStore';
 
 function toReferenceLabel(scripture: { book: string; chapter: number; verse: number; endVerse?: number }): string {
@@ -17,7 +17,24 @@ export default function RunSheetPanel() {
     clearQueue,
     setPreview,
     isLiveFrozen,
+    runSheetAuto,
+    transitionRuntime,
+    updateRunSheetAuto,
   } = useStore();
+
+  useEffect(() => {
+    if (!runSheetAuto.enabled) return;
+    const timer = setInterval(() => {
+      const state = useStore.getState();
+      if (!state.runSheetAuto.enabled) return;
+      if (state.isLiveFrozen) return;
+      if (state.transitionRuntime?.active) return;
+      if (state.queue.length === 0) return;
+      state.sendNextQueuedLive();
+    }, runSheetAuto.intervalSec * 1000);
+
+    return () => clearInterval(timer);
+  }, [runSheetAuto.enabled, runSheetAuto.intervalSec]);
 
   return (
     <div className="w-full max-w-3xl mb-4 bg-zinc-900/70 border border-zinc-800 rounded-xl p-3">
@@ -27,7 +44,28 @@ export default function RunSheetPanel() {
           <span className="text-xs uppercase tracking-wider font-semibold">Run Sheet</span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{queue.length}</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-zinc-700 bg-zinc-950">
+            <Timer className="w-3.5 h-3.5 text-indigo-400" />
+            <label className="text-[10px] text-zinc-500">Auto Cue</label>
+            <input
+              type="checkbox"
+              checked={runSheetAuto.enabled}
+              onChange={(e) => updateRunSheetAuto({ enabled: e.target.checked })}
+              className="accent-indigo-500"
+              title="Automatically send next queued reference on interval"
+            />
+            <input
+              type="number"
+              min={3}
+              max={600}
+              value={runSheetAuto.intervalSec}
+              onChange={(e) => updateRunSheetAuto({ intervalSec: Number(e.target.value) || runSheetAuto.intervalSec })}
+              className="w-14 bg-zinc-900 border border-zinc-700 text-zinc-300 text-[10px] rounded px-1.5 py-1 focus:outline-none focus:border-indigo-500"
+              title="Auto cue interval (seconds)"
+            />
+            <span className="text-[10px] text-zinc-500">s</span>
+          </div>
           <button
             onClick={queuePreview}
             disabled={!previewScripture}
@@ -61,9 +99,16 @@ export default function RunSheetPanel() {
       {queue.length === 0 ? (
         <p className="text-xs text-zinc-500 px-1 pb-1">
           Queue references for service flow, then send each live in order.
+          {runSheetAuto.enabled ? ` Auto cue is armed (${runSheetAuto.intervalSec}s) and will start once queue has items.` : ''}
         </p>
       ) : (
         <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+          {runSheetAuto.enabled && (
+            <p className="text-[10px] text-indigo-300 px-1">
+              Auto cue every {runSheetAuto.intervalSec}s
+              {isLiveFrozen ? ' (paused: live is frozen)' : transitionRuntime?.active ? ' (waiting for transition)' : ''}
+            </p>
+          )}
           {queue.map((item, idx) => (
             <div key={item.id} className="flex items-center justify-between gap-3 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2">
               <div className="min-w-0">

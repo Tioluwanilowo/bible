@@ -1,5 +1,5 @@
 import React, { useRef, useState, useLayoutEffect } from 'react';
-import { PresentationSettings, ThemeElements } from '../types';
+import { DEFAULT_ELEMENTS, PresentationSettings, ThemeElements } from '../types';
 
 interface ScriptureDisplayProps {
   text: string;
@@ -112,8 +112,9 @@ export default function ScriptureDisplay({
   const displayRef = showVersion ? `${reference}\u2002\u2022\u2002${version}` : reference;
 
   // ── Hoist element config so hooks can reference them unconditionally ──
-  const sc = elements?.scripture ?? { x: 5, y: 28, width: 90, visible: true };
-  const rf = elements?.reference ?? { x: 20, y: 72, width: 60, visible: true };
+  const sc = { ...DEFAULT_ELEMENTS.scripture, ...(elements?.scripture ?? {}) };
+  const rf = { ...DEFAULT_ELEMENTS.reference, ...(elements?.reference ?? {}) };
+  const boxes = Array.isArray(elements?.boxes) ? elements.boxes : [];
   const scFontPx = sc.fontSize ?? 64 * fontScale;
   const rfFontPx = rf.fontSize ?? 32 * fontScale;
 
@@ -211,6 +212,14 @@ export default function ScriptureDisplay({
     setRfAdjustedFont(bestVw > MIN_VW + 0.1 ? `${bestVw}vw` : `${configuredVw}vw`);
   }, [rf.autoFontSize, rf.height, rf.width, displayRef, rfFontPx]);
 
+  const radiusVw = (radius?: number) => `${((radius ?? 0) / 1920) * 100}vw`;
+  const textHighlight = (color?: string, opacity?: number): string => {
+    if (!color) return 'transparent';
+    const clampedOpacity = Math.max(0, Math.min(100, opacity ?? 0));
+    if (clampedOpacity === 0) return 'transparent';
+    return hexToRgba(color, clampedOpacity);
+  };
+
   // ── Custom absolute-position layout (from Theme Designer drag-drop) ──
   if (elements || layout === 'custom') {
     // Per-element style resolution — fall back to global settings when not overridden.
@@ -250,6 +259,28 @@ export default function ScriptureDisplay({
 
     return (
       <div style={containerStyle}>
+        {boxes
+          .filter((box) => box.visible !== false)
+          .map((box) => (
+            <div
+              key={box.id}
+              style={{
+                position: 'absolute',
+                left: `${box.x}%`,
+                top: `${box.y}%`,
+                width: `${box.width}%`,
+                height: `${box.height}%`,
+                zIndex: box.zIndex ?? 10,
+                borderRadius: radiusVw(box.borderRadius),
+                backgroundColor: hexToRgba(box.fillColor || '#000000', box.fillOpacity ?? 0),
+                backgroundImage: box.imageUrl ? `url("${box.imageUrl}")` : undefined,
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                backgroundRepeat: 'no-repeat',
+                overflow: 'hidden',
+              }}
+            />
+          ))}
         {sc.visible && (
           <div
             ref={scContainerRef}
@@ -259,7 +290,10 @@ export default function ScriptureDisplay({
               top: `${sc.y}%`,
               width: `${sc.width}%`,
               height: sc.height !== undefined ? `${sc.height}%` : 'auto',
-              overflow: sc.height !== undefined ? 'hidden' : 'visible',
+              overflow: sc.height !== undefined || (sc.textHighlightOpacity ?? 0) > 0 ? 'hidden' : 'visible',
+              zIndex: sc.zIndex ?? DEFAULT_ELEMENTS.scripture.zIndex ?? 20,
+              borderRadius: radiusVw(sc.borderRadius),
+              background: textHighlight(sc.textHighlightColor, sc.textHighlightOpacity),
               // Vertical alignment within fixed-height box
               ...(sc.height !== undefined ? {
                 display: 'flex',
@@ -282,7 +316,10 @@ export default function ScriptureDisplay({
               top: `${rf.y}%`,
               width: `${rf.width}%`,
               height: rf.height !== undefined ? `${rf.height}%` : 'auto',
-              overflow: rf.height !== undefined ? 'hidden' : 'visible',
+              overflow: rf.height !== undefined || (rf.textHighlightOpacity ?? 0) > 0 ? 'hidden' : 'visible',
+              zIndex: rf.zIndex ?? DEFAULT_ELEMENTS.reference.zIndex ?? 30,
+              borderRadius: radiusVw(rf.borderRadius),
+              background: textHighlight(rf.textHighlightColor, rf.textHighlightOpacity),
               // Vertical alignment within fixed-height box
               ...(rf.height !== undefined ? {
                 display: 'flex',

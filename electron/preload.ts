@@ -68,6 +68,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ndiGetStatus: (targetId?: string): Promise<{ status: string; reason?: string; sourceName?: string; targetId?: string; activeCount?: number }> =>
     ipcRenderer.invoke('ndi-get-status', { targetId }),
 
+  /** Get detailed NDI diagnostics (fps, frame counters, runtime detection). */
+  ndiGetDiagnostics: (targetId?: string): Promise<{
+    rows: Array<{
+      targetId: string;
+      sourceName: string;
+      active: boolean;
+      startedAt: number;
+      uptimeMs: number;
+      frameCount: number;
+      frameErrors: number;
+      fps: number;
+      lastFrameAt: number | null;
+      runtimeDetected: boolean;
+      runtimePath?: string;
+    }>;
+    summary: {
+      activeCount: number;
+      runtimeDetected: boolean;
+      runtimePath?: string;
+      checkedAt: number;
+    };
+  }> => ipcRenderer.invoke('ndi-get-diagnostics', { targetId }),
+
   /** Subscribe to NDI status changes pushed from main. */
   onNDIStatusChanged: (callback: (payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: { status: string; sourceName?: string; error?: string; targetId?: string; activeCount?: number }) => callback(payload);

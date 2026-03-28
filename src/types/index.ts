@@ -63,6 +63,69 @@ export interface QueuedReference {
   queuedAt: number;
 }
 
+export type LiveTransitionType = 'cut' | 'fade' | 'stinger';
+
+export interface LiveTransitionSettings {
+  style: LiveTransitionType;
+  durationMs: number;
+  stingerLabel: string;
+}
+
+export interface LiveTransitionRuntime {
+  active: boolean;
+  style: LiveTransitionType;
+  startedAt: number;
+  endsAt: number;
+}
+
+export interface RunSheetAutoSettings {
+  enabled: boolean;
+  intervalSec: number;
+}
+
+export interface ThemeAsset {
+  id: string;
+  name: string;
+  type: 'image' | 'font';
+  dataUrl: string;
+  mimeType: string;
+  createdAt: number;
+}
+
+export interface LatencySample {
+  id: string;
+  timestamp: number;
+  provider?: string;
+  audioToTranscriptMs?: number;
+  transcriptToIntentMs?: number;
+  intentToPreviewMs?: number;
+  previewToLiveMs?: number;
+  totalToLiveMs?: number;
+}
+
+export interface SessionEvent {
+  id: string;
+  timestamp: number;
+  type: 'transcript' | 'command' | 'preview' | 'live' | 'clear' | 'queue' | 'manual' | 'system';
+  label: string;
+  scripture?: Scripture | null;
+  details?: any;
+}
+
+export interface AppUserProfile {
+  id: string;
+  name: string;
+  settings: Settings;
+  version: string;
+  mode: 'auto' | 'manual';
+  runSheetAuto: RunSheetAutoSettings;
+  transitionSettings: LiveTransitionSettings;
+  activeThemeId: string | null;
+  activeVoiceProfileId: string | null;
+  outputTargets: OutputTarget[];
+  updatedAt: number;
+}
+
 export interface PastorVoiceProfile {
   id: string;
   name: string;
@@ -176,6 +239,10 @@ export interface ElementPosition {
   y: number;       // top edge % of canvas height
   width: number;   // element width % of canvas width (ignored when autoWidth=true)
   visible: boolean;
+  /** Layer order. Higher values render in front of lower values. */
+  zIndex?: number;
+  /** Rounded corner radius for text container/highlight (px at 1920 reference width). */
+  borderRadius?: number;
   /** When true the element shrinks/grows to fit its text (no fixed width) */
   autoWidth?: boolean;
   /** Element height % of canvas height. undefined = content height (no constraint) */
@@ -192,11 +259,30 @@ export interface ElementPosition {
   textAlignment?: 'left' | 'center' | 'right' | 'justify';
   /** Vertical alignment of text within a fixed-height box */
   verticalAlignment?: 'top' | 'middle' | 'bottom';
+  /** Optional text highlight color behind the element text (hex). */
+  textHighlightColor?: string;
+  /** Opacity % for text highlight color. */
+  textHighlightOpacity?: number;
+}
+
+export interface ThemeBoxLayer {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  zIndex: number;
+  fillColor: string;
+  fillOpacity: number;
+  borderRadius: number;
+  imageUrl?: string;
 }
 
 export interface ThemeElements {
   scripture: ElementPosition;
   reference: ElementPosition;
+  boxes: ThemeBoxLayer[];
 }
 
 export interface Theme {
@@ -210,8 +296,15 @@ export interface Theme {
 
 /** Default element layout — centered full-scripture style */
 export const DEFAULT_ELEMENTS: ThemeElements = {
-  scripture: { x: 5, y: 28, width: 90, visible: true, autoWidth: false, fontSize: 64 },
-  reference: { x: 20, y: 72, width: 60, visible: true, autoWidth: false, fontSize: 32 },
+  scripture: {
+    x: 5, y: 28, width: 90, visible: true, autoWidth: false, fontSize: 64,
+    zIndex: 20, borderRadius: 0, textHighlightColor: '#000000', textHighlightOpacity: 0,
+  },
+  reference: {
+    x: 20, y: 72, width: 60, visible: true, autoWidth: false, fontSize: 32,
+    zIndex: 30, borderRadius: 0, textHighlightColor: '#000000', textHighlightOpacity: 0,
+  },
+  boxes: [],
 };
 
 /** Snap zone presets for drag-drop canvas */
@@ -278,6 +371,8 @@ export interface AppState {
   activeThemeId: string | null;
   voiceProfiles: PastorVoiceProfile[];
   activeVoiceProfileId: string | null;
+  userProfiles: AppUserProfile[];
+  activeUserProfileId: string | null;
 
   // ── AI Reference State ────────────────────────────────────────────────────
   /** Rolling buffer of the last N final transcript chunks fed to the AI. */
@@ -295,6 +390,11 @@ export interface AppState {
   updateVoiceProfileFromCurrent: (id: string) => void;
   removeVoiceProfile: (id: string) => void;
   setActiveVoiceProfile: (id: string) => void;
+  createUserProfile: (name: string) => string;
+  renameUserProfile: (id: string, name: string) => void;
+  deleteUserProfile: (id: string) => void;
+  setActiveUserProfile: (id: string) => void;
+  saveCurrentToActiveProfile: () => void;
   // Output targets (multi-display / multi-window)
   outputTargets: OutputTarget[];
   addOutputTarget: () => string;
@@ -321,6 +421,13 @@ export interface AppState {
   pendingCommands: Command[];
   suggestions: SuggestedVerse[];
   queue: QueuedReference[];
+  runSheetAuto: RunSheetAutoSettings;
+  transitionSettings: LiveTransitionSettings;
+  transitionRuntime: LiveTransitionRuntime | null;
+  themeAssets: ThemeAsset[];
+  latencySamples: LatencySample[];
+  sessionEvents: SessionEvent[];
+  onboardingCompleted: boolean;
   liveOutputState: LiveOutputState;
   availableDisplays: DisplayInfo[];
   
@@ -367,6 +474,17 @@ export interface AppState {
   clearQueue: () => void;
   sendNextQueuedLive: () => void;
   sendQueuedReference: (id: string) => void;
+  updateRunSheetAuto: (updates: Partial<RunSheetAutoSettings>) => void;
+  setTransitionSettings: (updates: Partial<LiveTransitionSettings>) => void;
+  goLiveWithTransition: (scripture: Scripture | null, styleOverride?: LiveTransitionType) => void;
+  addThemeAsset: (asset: Omit<ThemeAsset, 'id' | 'createdAt'>) => string;
+  removeThemeAsset: (id: string) => void;
+  addLatencySample: (sample: Omit<LatencySample, 'id' | 'timestamp'>) => void;
+  clearLatencySamples: () => void;
+  addSessionEvent: (event: Omit<SessionEvent, 'id' | 'timestamp'>) => void;
+  clearSessionEvents: () => void;
+  replaySessionEvent: (id: string) => void;
+  setOnboardingCompleted: (value: boolean) => void;
 
   // Live Output Actions
   setLiveOutputState: (state: Partial<LiveOutputState>) => void;

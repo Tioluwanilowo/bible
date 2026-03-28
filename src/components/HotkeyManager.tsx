@@ -7,7 +7,7 @@ export default function HotkeyManager() {
     nextVerse, 
     prevVerse, 
     previewScripture, 
-    setLive, 
+    goLiveWithTransition, 
     clearLive, 
     toggleFreeze, 
     toggleAutoPause 
@@ -53,7 +53,7 @@ export default function HotkeyManager() {
                 prevVerse();
                 break;
               case 'goLive':
-                if (previewScripture) setLive(previewScripture);
+                if (previewScripture) goLiveWithTransition(previewScripture);
                 break;
               case 'clearLive':
                 clearLive();
@@ -72,7 +72,7 @@ export default function HotkeyManager() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [settings, nextVerse, prevVerse, previewScripture, setLive, clearLive, toggleFreeze, toggleAutoPause]);
+  }, [settings, nextVerse, prevVerse, previewScripture, goLiveWithTransition, clearLive, toggleFreeze, toggleAutoPause]);
 
   return null;
 }
