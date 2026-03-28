@@ -13,11 +13,9 @@
   ; Allow outbound NDI traffic (discovery multicast + streaming)
   nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="ScriptureFlow NDI" dir=out action=allow program="$INSTDIR\ScriptureFlow.exe" protocol=any'
 
-  ; Remove bundled stale DLL copies from grandiose.
-  nsExec::ExecToLog 'cmd /c if exist "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll" del /F /Q "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
-  nsExec::ExecToLog 'cmd /c if exist "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\lib\win_x64\Processing.NDI.Lib.x64.dll" del /F /Q "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\lib\win_x64\Processing.NDI.Lib.x64.dll"'
-
-  ; Copy NDI v6 runtime DLL into both grandiose lookup locations.
+  ; Copy NDI runtime DLL into grandiose lookup locations.
+  ; We do not delete bundled DLLs first, so install never ends up with
+  ; an empty/native-missing state if runtime probing fails.
   nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'
   nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Tools\Runtime\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\lib\win_x64\Processing.NDI.Lib.x64.dll"'
   nsExec::ExecToLog 'cmd /c if exist "$PROGRAMFILES64\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll" copy /Y "$PROGRAMFILES64\NDI\NDI 6 Tools\Router\Processing.NDI.Lib.x64.dll" "$INSTDIR\resources\app.asar.unpacked\node_modules\grandiose\build\Release\Processing.NDI.Lib.x64.dll"'

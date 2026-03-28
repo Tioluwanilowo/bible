@@ -665,26 +665,53 @@ const NDI_RUNTIME_PATHS = [
 
 let ndiRuntimeDiagnosticsLogged = false;
 
-function getGrandioseReleaseDir(): string {
+function getGrandioseRootDir(): string {
   if (isDev) {
-    return path.join(process.cwd(), 'node_modules', 'grandiose', 'build', 'Release');
+    return path.join(process.cwd(), 'node_modules', 'grandiose');
   }
-  return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose', 'build', 'Release');
+  return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose');
+}
+
+function getGrandioseReleaseDir(): string {
+  return path.join(getGrandioseRootDir(), 'build', 'Release');
 }
 
 function getGrandioseDllTargets(): string[] {
-  if (isDev) {
-    const root = path.join(process.cwd(), 'node_modules', 'grandiose');
-    return [
-      path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
-      path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
-    ];
-  }
-  const root = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose');
+  const root = getGrandioseRootDir();
   return [
     path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
     path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
   ];
+}
+
+function getGrandioseNodeCandidates(): string[] {
+  const root = getGrandioseRootDir();
+  const candidates = [
+    path.join(root, 'build', 'Release', 'grandiose.node'),
+  ];
+
+  const binRoot = path.join(root, 'bin');
+  try {
+    if (fs.existsSync(binRoot)) {
+      for (const entry of fs.readdirSync(binRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (!entry.name.toLowerCase().startsWith('win32-x64')) continue;
+        candidates.push(path.join(binRoot, entry.name, 'grandiose.node'));
+      }
+    }
+  } catch {
+    // ignore candidate enumeration errors
+  }
+
+  return [...new Set(candidates)];
+}
+
+function getStagedNDIRuntimeDir(): string {
+  try {
+    return path.join(app.getPath('userData'), 'ndi-native');
+  } catch {
+    return path.join(os.tmpdir(), 'scriptureflow-ndi-native');
+  }
 }
 
 function findInstalledNDIRuntimeDll(): string | null {
@@ -699,8 +726,7 @@ function findInstalledNDIRuntimeDll(): string | null {
   return null;
 }
 
-function syncBundledDllWithRuntime(): void {
-  const runtimeDll = findInstalledNDIRuntimeDll();
+function syncBundledDllWithRuntime(runtimeDll?: string | null): void {
   if (!runtimeDll) return;
 
   for (const target of getGrandioseDllTargets()) {
@@ -711,6 +737,84 @@ function syncBundledDllWithRuntime(): void {
     } catch (err: any) {
       console.warn(`[NDI] Could not sync runtime DLL to ${target}: ${err?.message ?? String(err)}`);
     }
+  }
+}
+
+function stageRuntimeDll(runtimeDll: string): string | null {
+  const stageDir = getStagedNDIRuntimeDir();
+  try {
+    fs.mkdirSync(stageDir, { recursive: true });
+    const stagedDll = path.join(stageDir, 'Processing.NDI.Lib.x64.dll');
+    fs.copyFileSync(runtimeDll, stagedDll);
+    return stageDir;
+  } catch (err: any) {
+    console.warn(`[NDI] Could not stage runtime DLL in userData: ${err?.message ?? String(err)}`);
+    return null;
+  }
+}
+
+function stageGrandioseNode(runtimeDll?: string | null): string | null {
+  const sourceNode = getGrandioseNodeCandidates().find((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  });
+  if (!sourceNode) return null;
+
+  const stageDir = getStagedNDIRuntimeDir();
+  const stagedNode = path.join(stageDir, 'grandiose.node');
+  try {
+    fs.mkdirSync(stageDir, { recursive: true });
+    fs.copyFileSync(sourceNode, stagedNode);
+    if (runtimeDll) {
+      fs.copyFileSync(runtimeDll, path.join(stageDir, 'Processing.NDI.Lib.x64.dll'));
+    }
+    return stagedNode;
+  } catch (err: any) {
+    console.warn(`[NDI] Could not stage grandiose.node in userData: ${err?.message ?? String(err)}`);
+    return null;
+  }
+}
+
+function wrapGrandioseAddon(addon: any): any {
+  const wrappedFind = (...args: any[]) => {
+    if (!addon || typeof addon.find !== 'function') return [];
+    if (args.length === 0) return addon.find();
+
+    const first = args[0];
+    if (first && typeof first === 'object') {
+      const normalized = { ...first };
+      if (Array.isArray(normalized.groups)) {
+        normalized.groups = normalized.groups.join(',');
+      }
+      if (Array.isArray(normalized.extraIPs)) {
+        normalized.extraIPs = normalized.extraIPs.join(',');
+      }
+      return addon.find(normalized);
+    }
+
+    return addon.find(...args);
+  };
+
+  return {
+    version: addon?.version,
+    find: wrappedFind,
+    isSupportedCPU: addon?.isSupportedCPU,
+    receive: addon?.receive,
+    send: addon?.send,
+    FOURCC_BGRA: addon?.FOURCC_BGRA,
+    SEND_TIMECODE_SYNTHESIZE: addon?.SEND_TIMECODE_SYNTHESIZE,
+  };
+}
+
+function tryLoadGrandioseFromNodePath(nodePath: string): { mod: any | null; error?: string } {
+  try {
+    const addon = require(nodePath);
+    if (!addon || typeof addon.send !== 'function') {
+      return { mod: null, error: `Native addon loaded but send() export is missing (${nodePath})` };
+    }
+    console.log(`[NDI] Loaded native grandiose addon directly from ${nodePath}`);
+    return { mod: wrapGrandioseAddon(addon) };
+  } catch (err: any) {
+    return { mod: null, error: `${nodePath}: ${err?.message ?? String(err)}` };
   }
 }
 
@@ -728,9 +832,10 @@ function logNDIDllDiagnostics(): void {
   }
 }
 
-function injectNDIRuntimePaths(): void {
+function injectNDIRuntimePaths(extraDirs: string[] = []): void {
   const existing = process.env.PATH ?? '';
-  const toAdd = NDI_RUNTIME_PATHS
+  const runtimeDirs = [...extraDirs, ...NDI_RUNTIME_PATHS];
+  const toAdd = runtimeDirs
     .filter(p => {
       try { return fs.existsSync(p); } catch { return false; }
     })
@@ -744,35 +849,69 @@ function injectNDIRuntimePaths(): void {
 
 function loadGrandiose(): any {
   if (ndiGrandiose) return ndiGrandiose;
+  const runtimeDll = findInstalledNDIRuntimeDll();
+  const stagedRuntimeDir = runtimeDll ? stageRuntimeDll(runtimeDll) : null;
+  const extraPathDirs = stagedRuntimeDir ? [stagedRuntimeDir] : [];
   // Ensure NDI Runtime DLLs are findable before the first require()
-  injectNDIRuntimePaths();
-  syncBundledDllWithRuntime();
+  injectNDIRuntimePaths(extraPathDirs);
+  syncBundledDllWithRuntime(runtimeDll);
   logNDIDllDiagnostics();
+  const loadErrors: string[] = [];
   try {
     ndiGrandiose = require('grandiose');
     ndiLoadError = null;
     console.log('[NDI] grandiose loaded successfully');
     return ndiGrandiose;
   } catch (err: any) {
-    ndiLoadError = err.message ?? String(err);
-    console.error(`[NDI] grandiose failed to load: ${ndiLoadError}`);
-    return null;
+    const initialErr = err?.message ?? String(err);
+    loadErrors.push(`require('grandiose'): ${initialErr}`);
+    console.warn(`[NDI] require('grandiose') failed: ${initialErr}`);
   }
+
+  const stagedNode = stageGrandioseNode(runtimeDll);
+  const directCandidates = [
+    ...(stagedNode ? [stagedNode] : []),
+    ...getGrandioseNodeCandidates(),
+  ];
+  for (const candidate of [...new Set(directCandidates)]) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+    } catch {
+      continue;
+    }
+
+    const loaded = tryLoadGrandioseFromNodePath(candidate);
+    if (loaded.mod) {
+      ndiGrandiose = loaded.mod;
+      ndiLoadError = null;
+      console.log('[NDI] grandiose direct native load succeeded');
+      return ndiGrandiose;
+    }
+    if (loaded.error) loadErrors.push(loaded.error);
+  }
+
+  ndiLoadError = loadErrors.join(' | ');
+  console.error(`[NDI] grandiose failed to load: ${ndiLoadError}`);
+  return null;
+}
+
+function hasExistingPath(p: string): boolean {
+  try { return fs.existsSync(p); } catch { return false; }
 }
 
 /** Human-readable explanation of why NDI is unavailable. */
 function ndiUnavailableReason(): string {
   const msg = ndiLoadError ?? '';
   if (msg.includes('Processing.NDI') || msg.includes('.dll') || msg.includes('DLL')) {
-    return 'NDI Runtime not installed — download NDI Tools from ndi.video/tools';
+    return `NDI runtime DLL could not be loaded (${msg}). Reinstall NDI 6 Tools and restart ScriptureFlow.`;
   }
   if (msg.includes('NODE_MODULE_VERSION') || msg.includes('was compiled against a different')) {
-    return 'grandiose needs to be recompiled for this Electron version — run: npm run setup-ndi';
+    return 'grandiose native module is ABI-mismatched for this Electron build. Rebuild with: npm run setup-ndi';
   }
   if (msg.includes('Cannot find module') || msg.includes('grandiose')) {
-    return 'grandiose not installed — run: npm run setup-ndi';
+    return 'grandiose native module not found. Reinstall dependencies and run: npm run setup-ndi';
   }
-  return msg ? `grandiose failed to load: ${msg}` : 'grandiose not installed — NDI SDK missing';
+  return msg ? `grandiose failed to load: ${msg}` : 'grandiose native module unavailable';
 }
 
 /**
@@ -1014,11 +1153,23 @@ function getNDIDiagnostics(targetId?: string): {
     activeCount: number;
     runtimeDetected: boolean;
     runtimePath?: string;
+    loadError?: string;
+    nodeTargets: string[];
+    dllTargets: string[];
     checkedAt: number;
   };
 } {
   const runtimePath = findInstalledNDIRuntimeDll() ?? undefined;
   const runtimeDetected = Boolean(runtimePath);
+  const loadError = ndiLoadError ?? undefined;
+  const nodeTargets = getGrandioseNodeCandidates().filter((candidate) => {
+    try { return fs.existsSync(candidate); } catch { return false; }
+  });
+  const stagedNode = path.join(getStagedNDIRuntimeDir(), 'grandiose.node');
+  if (hasExistingPath(stagedNode) && !nodeTargets.includes(stagedNode)) {
+    nodeTargets.unshift(stagedNode);
+  }
+  const dllTargets = getGrandioseDllTargets().filter((candidate) => hasExistingPath(candidate));
   const rows = Array.from(ndiSessions.values())
     .filter((session) => {
       if (!targetId || !targetId.trim()) return true;
@@ -1047,6 +1198,9 @@ function getNDIDiagnostics(targetId?: string): {
       activeCount: rows.length,
       runtimeDetected,
       runtimePath,
+      loadError,
+      nodeTargets,
+      dllTargets,
       checkedAt: Date.now(),
     },
   };
@@ -1675,5 +1829,6 @@ function registerDeepgramHandlers(): void {
 
   console.log('[Main] Deepgram IPC handlers registered ✓');
 }
+
 
 
