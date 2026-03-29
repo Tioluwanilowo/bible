@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { OutputPayload } from './types/output';
 import ScriptureDisplay from './components/ScriptureDisplay';
 import { PresentationSettings } from './types';

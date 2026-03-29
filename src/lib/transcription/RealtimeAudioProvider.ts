@@ -234,7 +234,6 @@ export class RealtimeAudioProvider implements TranscriptionProvider {
 
   /** The MediaStream passed to start() — retained so the audio pipeline can be
    *  re-bound after a session rotation if needed. */
-  private activeStream: MediaStream | null = null;
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -262,7 +261,6 @@ export class RealtimeAudioProvider implements TranscriptionProvider {
       );
     }
 
-    this.activeStream = stream;
     this.isRunning = true;
     this.setupAudioPipeline(stream);
     this.connectWebSocket();
@@ -676,7 +674,6 @@ export class RealtimeAudioProvider implements TranscriptionProvider {
       this.audioContext.close().catch(() => {});
       this.audioContext = null;
     }
-    this.activeStream = null;
     this.isWsOpen = false;
     this.sessionReady = false;
     this.isResponseInProgress = false;

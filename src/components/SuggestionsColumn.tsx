@@ -1,4 +1,3 @@
-import React from 'react';
 import { Lightbulb, Check, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
 

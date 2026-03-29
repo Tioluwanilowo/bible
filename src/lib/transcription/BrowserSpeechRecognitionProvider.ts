@@ -18,7 +18,7 @@ export class BrowserSpeechRecognitionProvider implements TranscriptionProvider {
     return 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
   }
 
-  async initialize(options?: any): Promise<void> {
+  async initialize(_options?: any): Promise<void> {
     if (!this.isSupported()) {
       throw new Error('Browser Speech Recognition is not supported in this environment.');
     }
@@ -120,7 +120,7 @@ export class BrowserSpeechRecognitionProvider implements TranscriptionProvider {
     }
   }
 
-  async start(stream?: MediaStream): Promise<void> {
+  async start(_stream?: MediaStream): Promise<void> {
     // Each start gets a fresh recognition instance and a new generation ID.
     this.sessionGen++;
     this.isRunning = true;

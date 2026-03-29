@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   X, RefreshCw, Monitor, Mic, Tv, Cpu, Plus, Trash2,
-  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound, Smartphone, UserPlus, Save, Copy, QrCode,
+  MonitorCheck, Circle, Radio, Eye, EyeOff, KeyRound, Smartphone, UserPlus, Save, Copy, QrCode, User, Upload,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { AudioInputManager } from '../lib/audioManager';
+import type { OBSSceneTarget } from '../types';
+import { isMissingObsHandlerError, listObsScenesDirect, triggerObsSceneDirect } from '../lib/obs/obsDirectClient';
 import QRCode from 'qrcode';
 
 interface SettingsModalProps {
@@ -59,18 +61,18 @@ type RemoteControlStatus = {
 
 export default function SettingsModal({ onClose }: SettingsModalProps) {
   const {
-    settings, updateSettings, updatePresentationSettings,
+    settings, updateSettings,
     isMockMode, setIsMockMode, isListening, availableDisplays,
     outputSettings, providerStatuses, setOutputSettings, outputLogs,
     themes, outputTargets, addOutputTarget, addNDITarget, removeOutputTarget, updateOutputTarget,
     voiceProfiles, activeVoiceProfileId, addVoiceProfileFromCurrent,
     updateVoiceProfileFromCurrent, removeVoiceProfile, setActiveVoiceProfile,
-    userProfiles, activeUserProfileId, createUserProfile, renameUserProfile, deleteUserProfile, setActiveUserProfile,
+    userProfiles, activeUserProfileId, createUserProfile, renameUserProfile, setUserProfileAvatar, deleteUserProfile, setActiveUserProfile,
   } = useStore();
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState<'audio' | 'presentation' | 'output' | 'remote' | 'routing'>('audio');
+  const [activeTab, setActiveTab] = useState<'audio' | 'profiles' | 'presentation' | 'output' | 'remote' | 'routing'>('audio');
   const [showApiKey, setShowApiKey] = useState(false);
   const [showOpenAiKey, setShowOpenAiKey] = useState(false);
   const [showChatGptKey, setShowChatGptKey] = useState(false);
@@ -91,6 +93,11 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const [ndiHealthByTarget, setNdiHealthByTarget] = useState<Record<string, NDIHealthSnapshot>>({});
   const [ndiDiagnosticsByTarget, setNdiDiagnosticsByTarget] = useState<Record<string, NDIDiagnosticsSnapshot>>({});
   const [ndiRuntimePath, setNdiRuntimePath] = useState<string>('');
+  const profileAvatarInputRef = useRef<HTMLInputElement | null>(null);
+  const [obsTestingTargetId, setObsTestingTargetId] = useState<string | null>(null);
+  const [obsTestResultByTarget, setObsTestResultByTarget] = useState<Record<string, string>>({});
+  const [obsLoadingScenesTargetId, setObsLoadingScenesTargetId] = useState<string | null>(null);
+  const [obsScenesByTarget, setObsScenesByTarget] = useState<Record<string, string[]>>({});
 
   const loadDevices = async () => {
     setIsRefreshing(true);
@@ -101,6 +108,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 
   const activeVoiceProfile = voiceProfiles.find((profile) => profile.id === activeVoiceProfileId) ?? null;
   const activeUserProfile = userProfiles.find((profile) => profile.id === activeUserProfileId) ?? null;
+  // Remote controls should advertise LAN URLs only so phones can actually reach the host app.
   const remoteNetworkUrls = (remoteStatus?.urls ?? []).filter((url) => {
     try {
       const host = new URL(url).hostname.toLowerCase();
@@ -119,6 +127,126 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         ...updates,
       },
     });
+  };
+
+  const obsAutomation = settings.obsAutomation ?? { enabled: false, triggerOnGoLive: true, targets: [] };
+  const obsTargets = Array.isArray(obsAutomation.targets) ? obsAutomation.targets : [];
+
+  const updateObsAutomation = (updates: Partial<typeof obsAutomation>) => {
+    updateSettings({
+      obsAutomation: {
+        ...obsAutomation,
+        ...updates,
+        targets: Array.isArray(updates.targets) ? updates.targets : obsTargets,
+      },
+    });
+  };
+
+  const updateObsTarget = (targetId: string, updates: Partial<OBSSceneTarget>) => {
+    updateObsAutomation({
+      targets: obsTargets.map((target) => (
+        target.id === targetId ? { ...target, ...updates } : target
+      )),
+    });
+  };
+
+  const addObsTarget = () => {
+    const nextIndex = obsTargets.length + 1;
+    updateObsAutomation({
+      targets: [
+        ...obsTargets,
+        {
+          id: crypto.randomUUID(),
+          name: `OBS ${nextIndex}`,
+          enabled: true,
+          host: '',
+          port: 4455,
+          password: '',
+          sceneName: '',
+          mode: 'program',
+        },
+      ],
+    });
+  };
+
+  const removeObsTarget = (targetId: string) => {
+    updateObsAutomation({
+      targets: obsTargets.filter((target) => target.id !== targetId),
+    });
+    setObsTestResultByTarget((prev) => {
+      const next = { ...prev };
+      delete next[targetId];
+      return next;
+    });
+    setObsScenesByTarget((prev) => {
+      const next = { ...prev };
+      delete next[targetId];
+      return next;
+    });
+  };
+
+  const testObsTarget = async (target: OBSSceneTarget) => {
+    setObsTestingTargetId(target.id);
+    setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: 'Testing OBS connection...' }));
+    try {
+      let result: any;
+      if (window.electronAPI?.obsTestTarget) {
+        try {
+          result = await window.electronAPI.obsTestTarget(target as any);
+        } catch (err: any) {
+          // If the running app instance has older preload/main handlers, use renderer fallback.
+          if (!isMissingObsHandlerError(err)) throw err;
+          result = await triggerObsSceneDirect(target);
+        }
+      } else {
+        result = await triggerObsSceneDirect(target);
+      }
+      const label = result?.ok
+        ? `OK: ${result.message}`
+        : `Failed: ${result?.message || 'Unknown error'}`;
+      setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: label }));
+    } catch (err: any) {
+      setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: `Failed: ${err?.message || 'Unknown error'}` }));
+    } finally {
+      setObsTestingTargetId(null);
+    }
+  };
+
+  const loadObsScenes = async (target: OBSSceneTarget) => {
+    setObsLoadingScenesTargetId(target.id);
+    setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: 'Connecting to OBS and loading scenes...' }));
+    try {
+      let result: any;
+      if (window.electronAPI?.obsListScenes) {
+        try {
+          result = await window.electronAPI.obsListScenes(target as any);
+        } catch (err: any) {
+          // Keep scenes loading functional even when IPC handlers are missing.
+          if (!isMissingObsHandlerError(err)) throw err;
+          result = await listObsScenesDirect(target);
+        }
+      } else {
+        result = await listObsScenesDirect(target);
+      }
+      if (!result?.ok) {
+        setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: `Failed: ${result?.message || 'Could not load scenes'}` }));
+        return;
+      }
+      const scenes = Array.isArray(result.scenes) ? result.scenes : [];
+      setObsScenesByTarget((prev) => ({ ...prev, [target.id]: scenes }));
+
+      const preferred = target.mode === 'preview'
+        ? (result.currentPreviewSceneName || result.currentProgramSceneName || scenes[0] || '')
+        : (result.currentProgramSceneName || result.currentPreviewSceneName || scenes[0] || '');
+      if (!target.sceneName && preferred) {
+        updateObsTarget(target.id, { sceneName: preferred });
+      }
+      setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: `OK: ${result.message}` }));
+    } catch (err: any) {
+      setObsTestResultByTarget((prev) => ({ ...prev, [target.id]: `Failed: ${err?.message || 'Could not load scenes'}` }));
+    } finally {
+      setObsLoadingScenesTargetId(null);
+    }
   };
 
   const refreshRemoteStatus = async () => {
@@ -152,6 +280,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
       setRemoteQrDataUrl('');
       return;
     }
+    // Regenerate QR whenever the selected LAN URL changes.
     let cancelled = false;
     QRCode.toDataURL(qrRemoteUrl, {
       margin: 1,
@@ -174,6 +303,18 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   useEffect(() => {
     setEditingUserProfileName(activeUserProfile?.name ?? '');
   }, [activeUserProfileId, userProfiles]);
+
+  const handleUploadProfileAvatar = (file?: File | null) => {
+    if (!file || !activeUserProfileId) return;
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (!result) return;
+      setUserProfileAvatar(activeUserProfileId, result);
+    };
+    reader.readAsDataURL(file);
+  };
 
   const refreshDisplays = () => {
     window.electronAPI?.getDisplays().then(displays => {
@@ -310,6 +451,7 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
         <div className="flex border-b border-zinc-800 shrink-0 overflow-x-auto">
           {([
             { id: 'audio', label: 'Audio & Transcription', icon: Mic },
+            { id: 'profiles', label: 'Profiles', icon: User },
             { id: 'presentation', label: 'Outputs & Display', icon: Monitor },
             { id: 'output', label: 'Output Providers', icon: Tv },
             { id: 'remote', label: 'Remote Control', icon: Smartphone },
@@ -332,89 +474,6 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
           {/* ── Audio & Transcription ─────────────────────────────── */}
           {activeTab === 'audio' && (
             <div className="space-y-6">
-              <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-medium text-white">Operator Profiles</h3>
-                    <p className="text-xs text-zinc-500 mt-1">
-                      Switch between saved setup presets for different operators or services.
-                    </p>
-                  </div>
-                  <span className="text-[10px] px-2 py-1 rounded bg-indigo-500/15 text-indigo-300">
-                    {userProfiles.length} profile{userProfiles.length === 1 ? '' : 's'}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-zinc-500 block mb-1">Active Profile</label>
-                    <select
-                      value={activeUserProfileId ?? ''}
-                      onChange={(e) => setActiveUserProfile(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
-                    >
-                      {userProfiles.map((profile) => (
-                        <option key={profile.id} value={profile.id}>
-                          {profile.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-zinc-500 block mb-1">Rename Active Profile</label>
-                    <input
-                      type="text"
-                      value={editingUserProfileName}
-                      onChange={(e) => setEditingUserProfileName(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
-                      placeholder="Profile name"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    onClick={() => {
-                      if (!activeUserProfileId) return;
-                      renameUserProfile(activeUserProfileId, editingUserProfileName);
-                    }}
-                    disabled={!activeUserProfileId || !editingUserProfileName.trim()}
-                    className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    Rename
-                  </button>
-                  <button
-                    onClick={() => {
-                      createUserProfile(newUserProfileName);
-                      setNewUserProfileName('');
-                    }}
-                    className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center justify-center gap-1"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" />
-                    New From Current
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (!activeUserProfileId) return;
-                      deleteUserProfile(activeUserProfileId);
-                    }}
-                    disabled={!activeUserProfileId || userProfiles.length <= 1}
-                    className="px-3 py-2 text-xs rounded-lg border border-red-900/60 text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Delete
-                  </button>
-                </div>
-
-                <input
-                  type="text"
-                  value={newUserProfileName}
-                  onChange={(e) => setNewUserProfileName(e.target.value)}
-                  placeholder="New profile name (optional)"
-                  className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <label className="block text-sm font-medium text-zinc-400">Audio Input Device</label>
@@ -928,6 +987,178 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
           )}
 
+          {/* ── Profiles ──────────────────────────────────────────── */}
+          {activeTab === 'profiles' && (
+            <div className="space-y-6">
+              <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">Operator Profiles</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Each operator can have their own settings, routing, and remote preferences.
+                    </p>
+                  </div>
+                  <span className="text-[10px] px-2 py-1 rounded bg-indigo-500/15 text-indigo-300">
+                    {userProfiles.length} profile{userProfiles.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {userProfiles.map((profile) => {
+                    const isActive = profile.id === activeUserProfileId;
+                    return (
+                      <button
+                        key={profile.id}
+                        onClick={() => setActiveUserProfile(profile.id)}
+                        className={`text-left rounded-xl border p-3 transition-colors ${
+                          isActive
+                            ? 'border-indigo-500 bg-indigo-500/10'
+                            : 'border-zinc-700 bg-zinc-900 hover:border-zinc-500'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full border border-zinc-700 bg-zinc-800 overflow-hidden flex items-center justify-center">
+                            {profile.avatarDataUrl ? (
+                              <img src={profile.avatarDataUrl} alt={`${profile.name} avatar`} className="w-full h-full object-cover" />
+                            ) : (
+                              <User className="w-5 h-5 text-zinc-300" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm text-white font-medium truncate">{profile.name}</p>
+                            <p className="text-[10px] text-zinc-500 truncate">ID: {profile.id}</p>
+                          </div>
+                          {isActive && (
+                            <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300">
+                              Active
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-700 bg-zinc-950 p-4 space-y-3">
+                <div className="flex items-start gap-4">
+                  <div className="w-20 h-20 rounded-full border border-zinc-700 bg-zinc-800 overflow-hidden flex items-center justify-center shrink-0">
+                    {activeUserProfile?.avatarDataUrl ? (
+                      <img src={activeUserProfile.avatarDataUrl} alt={`${activeUserProfile.name} avatar`} className="w-full h-full object-cover" />
+                    ) : (
+                      <User className="w-9 h-9 text-zinc-300" />
+                    )}
+                  </div>
+                  <div className="flex-1 space-y-2">
+                    <p className="text-sm text-white font-medium">Profile Avatar</p>
+                    <p className="text-xs text-zinc-500">
+                      Default is a human icon. You can replace it with a picture for each profile.
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => profileAvatarInputRef.current?.click()}
+                        disabled={!activeUserProfileId}
+                        className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        Upload Picture
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!activeUserProfileId) return;
+                          setUserProfileAvatar(activeUserProfileId, null);
+                        }}
+                        disabled={!activeUserProfileId || !activeUserProfile?.avatarDataUrl}
+                        className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-300 hover:border-zinc-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Use Human Icon
+                      </button>
+                    </div>
+                    <input
+                      ref={profileAvatarInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        handleUploadProfileAvatar(e.target.files?.[0] ?? null);
+                        e.currentTarget.value = '';
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Active Profile</label>
+                    <select
+                      value={activeUserProfileId ?? ''}
+                      onChange={(e) => setActiveUserProfile(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                    >
+                      {userProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-zinc-500 block mb-1">Rename Active Profile</label>
+                    <input
+                      type="text"
+                      value={editingUserProfileName}
+                      onChange={(e) => setEditingUserProfileName(e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                      placeholder="Profile name"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => {
+                      if (!activeUserProfileId) return;
+                      renameUserProfile(activeUserProfileId, editingUserProfileName);
+                    }}
+                    disabled={!activeUserProfileId || !editingUserProfileName.trim()}
+                    className="px-3 py-2 text-xs rounded-lg border border-zinc-700 text-zinc-200 hover:border-indigo-500 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    Rename
+                  </button>
+                  <button
+                    onClick={() => {
+                      createUserProfile(newUserProfileName);
+                      setNewUserProfileName('');
+                    }}
+                    className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center justify-center gap-1"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    New From Current
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!activeUserProfileId) return;
+                      deleteUserProfile(activeUserProfileId);
+                    }}
+                    disabled={!activeUserProfileId || userProfiles.length <= 1}
+                    className="px-3 py-2 text-xs rounded-lg border border-red-900/60 text-red-300 hover:bg-red-900/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Delete
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  value={newUserProfileName}
+                  onChange={(e) => setNewUserProfileName(e.target.value)}
+                  placeholder="New profile name (optional)"
+                  className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+          )}
+
           {/* ── Outputs & Display ─────────────────────────────────── */}
           {activeTab === 'presentation' && (
             <div className="space-y-4">
@@ -1316,6 +1547,184 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium text-white">OBS Scene Automation</h3>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      Automatically switch OBS scenes when ScriptureFlow goes live. Supports multiple OBS instances.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={obsAutomation.enabled}
+                      onChange={(e) => updateObsAutomation({ enabled: e.target.checked })}
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 rounded-full peer peer-checked:bg-indigo-600 relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-5" />
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2">
+                  <div>
+                    <p className="text-xs text-zinc-300">Trigger on Go Live</p>
+                    <p className="text-[10px] text-zinc-500">Switch scene each time scripture is sent live.</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={obsAutomation.triggerOnGoLive !== false}
+                      onChange={(e) => updateObsAutomation({ triggerOnGoLive: e.target.checked })}
+                      disabled={!obsAutomation.enabled}
+                    />
+                    <div className="w-10 h-5 bg-zinc-800 rounded-full peer peer-checked:bg-emerald-600 relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5 disabled:opacity-50" />
+                  </label>
+                </div>
+
+                <div className="space-y-3">
+                  {obsTargets.map((target) => (
+                    <div key={target.id} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={target.name}
+                          onChange={(e) => updateObsTarget(target.id, { name: e.target.value })}
+                          placeholder="OBS Label"
+                          className="flex-1 bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled}
+                        />
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="sr-only peer"
+                            checked={target.enabled}
+                            onChange={(e) => updateObsTarget(target.id, { enabled: e.target.checked })}
+                            disabled={!obsAutomation.enabled}
+                          />
+                          <div className="w-10 h-5 bg-zinc-800 rounded-full peer peer-checked:bg-indigo-600 relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5 disabled:opacity-50" />
+                        </label>
+                        <button
+                          onClick={() => removeObsTarget(target.id)}
+                          className="p-1.5 rounded-md border border-zinc-700 text-zinc-400 hover:text-red-300 hover:border-red-800 transition-colors"
+                          title="Remove OBS target"
+                          disabled={!obsAutomation.enabled}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={target.host}
+                          onChange={(e) => updateObsTarget(target.id, { host: e.target.value })}
+                          placeholder="Host or ws://host"
+                          className="bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled}
+                        />
+                        <input
+                          type="number"
+                          min={1}
+                          max={65535}
+                          value={target.port}
+                          onChange={(e) => {
+                            const parsed = Number(e.target.value);
+                            const nextPort = Number.isFinite(parsed) ? Math.min(65535, Math.max(1, parsed)) : 4455;
+                            updateObsTarget(target.id, { port: nextPort });
+                          }}
+                          placeholder="Port"
+                          className="bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled}
+                        />
+                      </div>
+
+                      <input
+                        type="password"
+                        value={target.password}
+                        onChange={(e) => updateObsTarget(target.id, { password: e.target.value })}
+                        placeholder="OBS WebSocket password (leave empty if none)"
+                        className="w-full bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                        disabled={!obsAutomation.enabled}
+                      />
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={target.sceneName}
+                          onChange={(e) => updateObsTarget(target.id, { sceneName: e.target.value })}
+                          placeholder="Scene name to switch"
+                          className="bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled}
+                        />
+                        <select
+                          value={target.mode}
+                          onChange={(e) => updateObsTarget(target.id, { mode: e.target.value as OBSSceneTarget['mode'] })}
+                          className="bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled}
+                        >
+                          <option value="program">Switch Program (Live)</option>
+                          <option value="preview">Switch Preview (Studio Mode)</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => loadObsScenes(target)}
+                          disabled={!obsAutomation.enabled || obsLoadingScenesTargetId === target.id}
+                          className="px-3 py-1.5 rounded-lg bg-indigo-700/70 hover:bg-indigo-600 text-white text-xs transition-colors disabled:opacity-50"
+                        >
+                          {obsLoadingScenesTargetId === target.id ? 'Loading scenes...' : 'Connect & Load Scenes'}
+                        </button>
+                        <select
+                          value={target.sceneName}
+                          onChange={(e) => updateObsTarget(target.id, { sceneName: e.target.value })}
+                          className="flex-1 bg-zinc-900 border border-zinc-700 text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-indigo-500"
+                          disabled={!obsAutomation.enabled || (obsScenesByTarget[target.id]?.length ?? 0) === 0}
+                        >
+                          {(obsScenesByTarget[target.id]?.length ?? 0) === 0 ? (
+                            <option value="">No scenes loaded yet</option>
+                          ) : (
+                            obsScenesByTarget[target.id].map((sceneName) => (
+                              <option key={sceneName} value={sceneName}>
+                                {sceneName}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          onClick={() => testObsTarget(target)}
+                          disabled={!obsAutomation.enabled || obsTestingTargetId === target.id}
+                          className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs transition-colors disabled:opacity-50"
+                        >
+                          {obsTestingTargetId === target.id ? 'Testing...' : 'Test Scene Switch'}
+                        </button>
+                        <p className={`text-[10px] truncate ${obsTestResultByTarget[target.id]?.startsWith('OK:') ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                          {obsTestResultByTarget[target.id] || 'No test result yet'}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  onClick={addObsTarget}
+                  disabled={!obsAutomation.enabled}
+                  className="w-full py-2 border border-dashed border-zinc-700 hover:border-indigo-500 text-zinc-400 hover:text-indigo-300 text-xs rounded-lg flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add OBS Instance
+                </button>
+
+                <p className="text-[10px] text-zinc-500">
+                  Use OBS WebSocket v5 (default port 4455). Enable OBS WebSocket server, then load scenes and pick one.
+                </p>
               </div>
 
               <div className="pt-4 border-t border-zinc-800">

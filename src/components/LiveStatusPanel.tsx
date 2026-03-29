@@ -1,9 +1,8 @@
-import React from 'react';
 import { useStore } from '../store/useStore';
 import { Monitor, MonitorOff, LayoutTemplate, Snowflake, RefreshCw } from 'lucide-react';
 
 export default function LiveStatusPanel() {
-  const { liveOutputState, availableDisplays, settings, themes, activeThemeId } = useStore();
+  const { liveOutputState, availableDisplays, themes, activeThemeId } = useStore();
   const { windowStatus, targetDisplayId, currentTheme, currentLayout, isFrozen, previewDiffersFromLive } = liveOutputState;
   const activeTheme = themes.find(t => t.id === activeThemeId);
 

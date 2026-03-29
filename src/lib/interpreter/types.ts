@@ -1,4 +1,4 @@
-import type { Command, ConfirmedRef, PendingRef } from '../../types';
+import type { Command, PendingRef } from '../../types';
 
 // ── AI command vocabulary ────────────────────────────────────────────────────
 export type AICommand =

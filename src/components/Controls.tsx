@@ -1,4 +1,3 @@
-import React from 'react';
 import { useStore } from '../store/useStore';
 import { Play, Square, ChevronLeft, ChevronRight, Snowflake, Pause, ListPlus, Send } from 'lucide-react';
 

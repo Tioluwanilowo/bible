@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import PreviewPanel from './components/PreviewPanel';
 import ActivityPanel from './components/ActivityPanel';
@@ -11,6 +11,7 @@ import LiveOutputManager from './components/LiveOutputManager';
 import LiveStatusPanel from './components/LiveStatusPanel';
 import RemoteControlBridge from './components/RemoteControlBridge';
 import FirstRunWizard from './components/FirstRunWizard';
+import ProfileLaunchPicker from './components/ProfileLaunchPicker';
 import { useStore } from './store/useStore';
 import { loadDefaultBibles } from './lib/bibleEngine';
 import { bibleLibrary } from './lib/bible/BibleLibraryManager';
@@ -21,6 +22,7 @@ export default function App() {
   const toggleThemeDesigner = useStore(state => state.toggleThemeDesigner);
   const setAvailableVersions = useStore(state => state.setAvailableVersions);
   const [biblesLoaded, setBiblesLoaded] = useState(false);
+  const [profileChosen, setProfileChosen] = useState(false);
 
   useEffect(() => {
     loadDefaultBibles().then(() => {
@@ -39,6 +41,10 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  if (!profileChosen) {
+    return <ProfileLaunchPicker onContinue={() => setProfileChosen(true)} />;
   }
 
   return (

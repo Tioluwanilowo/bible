@@ -1,4 +1,3 @@
-import React from 'react';
 import { useStore } from '../store/useStore';
 import ManualSearch from './ManualSearch';
 import RunSheetPanel from './RunSheetPanel';
@@ -9,7 +8,7 @@ export default function PreviewPanel() {
   const latestCommand = commands[0];
 
   return (
-    <div className="flex-1 flex flex-col bg-zinc-950 p-6">
+    <div className="flex-1 flex flex-col bg-zinc-950 p-6 overflow-y-auto">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Operator Preview</h2>
         {latestCommand && mode === 'auto' && !isAutoPaused && (

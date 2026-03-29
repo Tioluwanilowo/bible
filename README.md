@@ -62,6 +62,8 @@ Enter both keys in **Settings → Audio & Transcription** after launching the ap
 
 ## Running from Source (Developers)
 
+For full contributor docs, see [DEVELOPER.md](./DEVELOPER.md).
+
 **Prerequisites:** Node.js 20+, npm
 
 ```bash

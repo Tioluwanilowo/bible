@@ -17,17 +17,16 @@ export class MockTranscriptionProvider implements TranscriptionProvider {
   private timer: any = null;
   private currentIndex = 0;
   private onTranscriptChunkCallback?: (transcript: Transcript) => void;
-  private onErrorCallback?: (error: Error) => void;
 
   isSupported(): boolean {
     return true;
   }
 
-  async initialize(options?: any): Promise<void> {
+  async initialize(_options?: any): Promise<void> {
     // No initialization needed for mock
   }
 
-  async start(stream?: MediaStream): Promise<void> {
+  async start(_stream?: MediaStream): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
     this.currentIndex = 0;
@@ -42,15 +41,14 @@ export class MockTranscriptionProvider implements TranscriptionProvider {
   async dispose(): Promise<void> {
     await this.stop();
     this.onTranscriptChunkCallback = undefined;
-    this.onErrorCallback = undefined;
   }
 
   set onTranscriptChunk(callback: (transcript: Transcript) => void) {
     this.onTranscriptChunkCallback = callback;
   }
 
-  set onError(callback: (error: Error) => void) {
-    this.onErrorCallback = callback;
+  set onError(_callback: (error: Error) => void) {
+    // Mock provider currently has no error path.
   }
 
   private emitNext() {

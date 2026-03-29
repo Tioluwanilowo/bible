@@ -115,6 +115,8 @@ export interface SessionEvent {
 export interface AppUserProfile {
   id: string;
   name: string;
+  /** Optional operator avatar image shown in profile picker/sidebar. */
+  avatarDataUrl?: string;
   settings: Settings;
   version: string;
   mode: 'auto' | 'manual';
@@ -141,6 +143,25 @@ export interface RemoteControlSettings {
   enabled: boolean;
   port: number;
   token: string;
+}
+
+export type OBSSceneSwitchMode = 'program' | 'preview';
+
+export interface OBSSceneTarget {
+  id: string;
+  name: string;
+  enabled: boolean;
+  host: string;
+  port: number;
+  password: string;
+  sceneName: string;
+  mode: OBSSceneSwitchMode;
+}
+
+export interface OBSAutomationSettings {
+  enabled: boolean;
+  triggerOnGoLive: boolean;
+  targets: OBSSceneTarget[];
 }
 
 export type ListeningState = 'idle' | 'initializing' | 'listening' | 'error' | 'stopped';
@@ -180,6 +201,8 @@ export interface Settings {
   suggestionCooldownMs: number;
   /** Built-in local network remote control server configuration. */
   remoteControl: RemoteControlSettings;
+  /** OBS WebSocket scene switching automation triggered on Go Live. */
+  obsAutomation: OBSAutomationSettings;
   presentation: PresentationSettings;
   targetDisplayId: string | null;
   hotkeys: Record<string, HotkeyConfig>;
@@ -392,6 +415,7 @@ export interface AppState {
   setActiveVoiceProfile: (id: string) => void;
   createUserProfile: (name: string) => string;
   renameUserProfile: (id: string, name: string) => void;
+  setUserProfileAvatar: (id: string, avatarDataUrl: string | null) => void;
   deleteUserProfile: (id: string) => void;
   setActiveUserProfile: (id: string) => void;
   saveCurrentToActiveProfile: () => void;

@@ -2,7 +2,7 @@ import { NumberWordConverter } from './NumberWordConverter';
 import { ScriptureReferenceParser } from './ScriptureReferenceParser';
 import { ScriptureContextResolver } from './ScriptureContextResolver';
 import { ReferenceValidator } from './ReferenceValidator';
-import { ParsedReference, ParsingResult } from './types';
+import { ParsingResult } from './types';
 import { Scripture } from '../../types';
 
 export class ParsingPipeline {

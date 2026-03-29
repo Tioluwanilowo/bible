@@ -21,7 +21,7 @@ function VerseCard({
   icon: React.ReactNode;
 }) {
   return (
-    <div className={`rounded-2xl border p-6 min-h-[300px] h-full flex flex-col ${accent}`}>
+    <div className={`rounded-2xl border p-6 min-h-[260px] flex flex-col ${accent}`}>
       <div className="flex items-center gap-2 mb-3">
         {icon}
         <span className="text-sm uppercase tracking-wider font-semibold">{title}</span>
@@ -49,7 +49,7 @@ export default function ProgramMonitorPanel() {
   const previewText = previewScripture?.text ?? 'No preview selected yet.';
 
   return (
-    <div className="w-full flex-1 min-h-0">
+    <div className="w-full">
       <div className="flex items-center justify-between mb-2 px-1 gap-2">
         <h3 className="text-xs uppercase tracking-wider font-semibold text-zinc-500">Program View</h3>
         <span className="text-[11px] text-zinc-600">Preview (left) + Live (right)</span>
@@ -105,7 +105,7 @@ export default function ProgramMonitorPanel() {
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-4 h-full">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <VerseCard
           title="Preview (Next)"
           subtitle={refLabel(previewScripture)}

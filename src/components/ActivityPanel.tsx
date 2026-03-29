@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '../store/useStore';
 import { History, Activity, MessageSquare, Terminal, CheckCircle, Check, X, Gauge, RotateCcw, Trash2 } from 'lucide-react';
 

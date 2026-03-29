@@ -22,6 +22,36 @@ declare global {
     checkedAt: number;
   }
 
+  interface OBSSceneTargetConfig {
+    id: string;
+    name: string;
+    enabled: boolean;
+    host: string;
+    port: number;
+    password: string;
+    sceneName: string;
+    mode: 'program' | 'preview';
+  }
+
+  interface OBSSceneTriggerResult {
+    ok: boolean;
+    targetId: string;
+    targetName: string;
+    mode: 'program' | 'preview';
+    sceneName: string;
+    message: string;
+  }
+
+  interface OBSSceneListResult {
+    ok: boolean;
+    targetId: string;
+    targetName: string;
+    scenes: string[];
+    currentProgramSceneName?: string;
+    currentPreviewSceneName?: string;
+    message: string;
+  }
+
   interface Window {
     electronAPI?: {
       sendToLive: (windowId: string, data: any) => void;
@@ -55,6 +85,15 @@ declare global {
 
       /** Open a URL in the system default browser */
       openExternal?: (url: string) => void;
+
+      obsTriggerGoLive?: (payload: {
+        enabled: boolean;
+        triggerOnGoLive?: boolean;
+        targets: OBSSceneTargetConfig[];
+        reference?: string;
+      }) => Promise<{ ok: boolean; results: OBSSceneTriggerResult[]; skipped?: string }>;
+      obsTestTarget?: (target: OBSSceneTargetConfig) => Promise<OBSSceneTriggerResult>;
+      obsListScenes?: (target: OBSSceneTargetConfig) => Promise<OBSSceneListResult>;
     };
   }
 }

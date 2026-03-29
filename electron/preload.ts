@@ -101,6 +101,43 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /** Open a URL in the system's default browser (safe external link handler) */
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
 
+  // OBS scene automation (multi-target)
+  obsTriggerGoLive: (payload: {
+    enabled: boolean;
+    triggerOnGoLive?: boolean;
+    targets: Array<{
+      id: string;
+      name: string;
+      enabled: boolean;
+      host: string;
+      port: number;
+      password: string;
+      sceneName: string;
+      mode: 'program' | 'preview';
+    }>;
+    reference?: string;
+  }) => ipcRenderer.invoke('obs-trigger-go-live', payload),
+  obsTestTarget: (target: {
+    id: string;
+    name: string;
+    enabled: boolean;
+    host: string;
+    port: number;
+    password: string;
+    sceneName: string;
+    mode: 'program' | 'preview';
+  }) => ipcRenderer.invoke('obs-test-target', target),
+  obsListScenes: (target: {
+    id: string;
+    name: string;
+    enabled: boolean;
+    host: string;
+    port: number;
+    password: string;
+    sceneName: string;
+    mode: 'program' | 'preview';
+  }) => ipcRenderer.invoke('obs-list-scenes', target),
+
   // ── Realtime WebSocket bridge ──────────────────────────────────────────────
   // The main process owns the authenticated WS; the renderer tunnels audio/events
   // through IPC so the API key never appears in renderer network traffic.

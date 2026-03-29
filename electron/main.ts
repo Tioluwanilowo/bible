@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, screen, session, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
+import { createHash, randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -107,12 +108,496 @@ type RemoteClientInfo = {
   lastCommandAt?: number;
 };
 
+type OBSSceneMode = 'program' | 'preview';
+
+type OBSSceneTarget = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  host: string;
+  port: number;
+  password: string;
+  sceneName: string;
+  mode: OBSSceneMode;
+};
+
+type OBSGoLivePayload = {
+  enabled: boolean;
+  triggerOnGoLive?: boolean;
+  targets: OBSSceneTarget[];
+  reference?: string;
+};
+
+type OBSSceneTriggerResult = {
+  ok: boolean;
+  targetId: string;
+  targetName: string;
+  mode: OBSSceneMode;
+  sceneName: string;
+  message: string;
+};
+
+type OBSSceneListResult = {
+  ok: boolean;
+  targetId: string;
+  targetName: string;
+  scenes: string[];
+  currentProgramSceneName?: string;
+  currentPreviewSceneName?: string;
+  message: string;
+};
+
+function sha256Base64(value: string): string {
+  return createHash('sha256').update(value).digest('base64');
+}
+
+function buildObsAuthentication(password: string, salt: string, challenge: string): string {
+  const secret = sha256Base64(`${password}${salt}`);
+  return sha256Base64(`${secret}${challenge}`);
+}
+
+function normalizeObsUrl(host: string, port: number): string {
+  const trimmedHost = (host || '').trim();
+  const safePort = Number.isFinite(port) ? Math.min(65535, Math.max(1, Math.round(port))) : 4455;
+  if (!trimmedHost) return '';
+  if (/^wss?:\/\//i.test(trimmedHost)) {
+    try {
+      const parsed = new URL(trimmedHost);
+      if (!parsed.port) parsed.port = String(safePort);
+      if (parsed.pathname === '/') parsed.pathname = '';
+      return parsed.toString().replace(/\/$/, '');
+    } catch {
+      return '';
+    }
+  }
+  const hostWithoutSlashes = trimmedHost.replace(/^\/+|\/+$/g, '');
+  return `ws://${hostWithoutSlashes}:${safePort}`;
+}
+
+function normalizeObsSceneTarget(raw: any, options?: { requireScene?: boolean }): OBSSceneTarget | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const requireScene = options?.requireScene !== false;
+  const host = typeof raw.host === 'string' ? raw.host.trim() : '';
+  const sceneName = typeof raw.sceneName === 'string' ? raw.sceneName.trim() : '';
+  if (!host) return null;
+  if (requireScene && !sceneName) return null;
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id : randomUUID();
+  const mode: OBSSceneMode = raw.mode === 'preview' ? 'preview' : 'program';
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : host;
+  const port = Number.isFinite(raw.port) ? Math.min(65535, Math.max(1, Math.round(raw.port))) : 4455;
+  const password = typeof raw.password === 'string' ? raw.password : '';
+  return {
+    id,
+    name,
+    enabled: raw.enabled !== false,
+    host,
+    port,
+    password,
+    sceneName,
+    mode,
+  };
+}
+
+async function triggerObsSceneForTarget(target: OBSSceneTarget): Promise<OBSSceneTriggerResult> {
+  const { WS, error: wsLoadError } = loadWsClass();
+  if (!WS) {
+    return {
+      ok: false,
+      targetId: target.id,
+      targetName: target.name,
+      mode: target.mode,
+      sceneName: target.sceneName,
+      message: wsLoadError || 'WebSocket client unavailable',
+    };
+  }
+
+  const wsUrl = normalizeObsUrl(target.host, target.port);
+  if (!wsUrl) {
+    return {
+      ok: false,
+      targetId: target.id,
+      targetName: target.name,
+      mode: target.mode,
+      sceneName: target.sceneName,
+      message: 'Invalid OBS host or port',
+    };
+  }
+
+  return new Promise<OBSSceneTriggerResult>((resolve) => {
+    const timeoutMs = 7000;
+    const requestId = randomUUID();
+    const requestType = target.mode === 'preview' ? 'SetCurrentPreviewScene' : 'SetCurrentProgramScene';
+    let completed = false;
+    let ws: any = null;
+
+    const finish = (result: OBSSceneTriggerResult) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      try { ws?.close(); } catch { /* ignore */ }
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        mode: target.mode,
+        sceneName: target.sceneName,
+        message: 'Timed out waiting for OBS response',
+      });
+    }, timeoutMs);
+
+    try {
+      ws = new WS(wsUrl);
+    } catch (err: any) {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        mode: target.mode,
+        sceneName: target.sceneName,
+        message: err?.message || 'Failed to create OBS socket',
+      });
+      return;
+    }
+
+    ws.on('message', (raw: any) => {
+      let packet: any;
+      try {
+        packet = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      const op = Number(packet?.op);
+      const data = packet?.d || {};
+
+      if (op === 0) {
+        const identify: any = {
+          rpcVersion: typeof data?.rpcVersion === 'number' ? data.rpcVersion : 1,
+          eventSubscriptions: 0,
+        };
+        const challenge = data?.authentication?.challenge;
+        const salt = data?.authentication?.salt;
+        if (challenge && salt) {
+          if (!target.password) {
+            finish({
+              ok: false,
+              targetId: target.id,
+              targetName: target.name,
+              mode: target.mode,
+              sceneName: target.sceneName,
+              message: 'OBS requires a password but none was provided',
+            });
+            return;
+          }
+          identify.authentication = buildObsAuthentication(target.password, salt, challenge);
+        }
+        try {
+          ws.send(JSON.stringify({ op: 1, d: identify }));
+        } catch (err: any) {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            mode: target.mode,
+            sceneName: target.sceneName,
+            message: err?.message || 'Failed to identify with OBS',
+          });
+        }
+        return;
+      }
+
+      if (op === 2) {
+        const requestPacket = {
+          op: 6,
+          d: {
+            requestType,
+            requestId,
+            requestData: { sceneName: target.sceneName },
+          },
+        };
+        try {
+          ws.send(JSON.stringify(requestPacket));
+        } catch (err: any) {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            mode: target.mode,
+            sceneName: target.sceneName,
+            message: err?.message || 'Failed to send OBS scene request',
+          });
+        }
+        return;
+      }
+
+      if (op === 7 && data?.requestId === requestId) {
+        const status = data?.requestStatus || {};
+        if (status?.result) {
+          finish({
+            ok: true,
+            targetId: target.id,
+            targetName: target.name,
+            mode: target.mode,
+            sceneName: target.sceneName,
+            message: `Switched ${target.mode} scene to "${target.sceneName}"`,
+          });
+        } else {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            mode: target.mode,
+            sceneName: target.sceneName,
+            message: String(status?.comment || `OBS request failed (code ${status?.code ?? 'unknown'})`),
+          });
+        }
+      }
+    });
+
+    ws.on('error', (err: Error) => {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        mode: target.mode,
+        sceneName: target.sceneName,
+        message: err?.message || 'OBS socket error',
+      });
+    });
+
+    ws.on('close', (code: number, reason: Buffer) => {
+      if (completed) return;
+      const detail = reason?.toString?.() || 'connection closed';
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        mode: target.mode,
+        sceneName: target.sceneName,
+        message: `OBS closed connection (${code}): ${detail}`,
+      });
+    });
+  });
+}
+
+async function listObsScenesForTarget(target: OBSSceneTarget): Promise<OBSSceneListResult> {
+  const { WS, error: wsLoadError } = loadWsClass();
+  if (!WS) {
+    return {
+      ok: false,
+      targetId: target.id,
+      targetName: target.name,
+      scenes: [],
+      message: wsLoadError || 'WebSocket client unavailable',
+    };
+  }
+
+  const wsUrl = normalizeObsUrl(target.host, target.port);
+  if (!wsUrl) {
+    return {
+      ok: false,
+      targetId: target.id,
+      targetName: target.name,
+      scenes: [],
+      message: 'Invalid OBS host or port',
+    };
+  }
+
+  return new Promise<OBSSceneListResult>((resolve) => {
+    const timeoutMs = 7000;
+    const requestId = randomUUID();
+    let completed = false;
+    let ws: any = null;
+
+    const finish = (result: OBSSceneListResult) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      try { ws?.close(); } catch { /* ignore */ }
+      resolve(result);
+    };
+
+    const timeout = setTimeout(() => {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        scenes: [],
+        message: 'Timed out loading scenes from OBS',
+      });
+    }, timeoutMs);
+
+    try {
+      ws = new WS(wsUrl);
+    } catch (err: any) {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        scenes: [],
+        message: err?.message || 'Failed to create OBS socket',
+      });
+      return;
+    }
+
+    ws.on('message', (raw: any) => {
+      let packet: any;
+      try {
+        packet = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      const op = Number(packet?.op);
+      const data = packet?.d || {};
+
+      if (op === 0) {
+        const identify: any = {
+          rpcVersion: typeof data?.rpcVersion === 'number' ? data.rpcVersion : 1,
+          eventSubscriptions: 0,
+        };
+        const challenge = data?.authentication?.challenge;
+        const salt = data?.authentication?.salt;
+        if (challenge && salt) {
+          if (!target.password) {
+            finish({
+              ok: false,
+              targetId: target.id,
+              targetName: target.name,
+              scenes: [],
+              message: 'OBS requires a password but none was provided',
+            });
+            return;
+          }
+          identify.authentication = buildObsAuthentication(target.password, salt, challenge);
+        }
+        try {
+          ws.send(JSON.stringify({ op: 1, d: identify }));
+        } catch (err: any) {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            scenes: [],
+            message: err?.message || 'Failed to identify with OBS',
+          });
+        }
+        return;
+      }
+
+      if (op === 2) {
+        try {
+          ws.send(JSON.stringify({
+            op: 6,
+            d: {
+              requestType: 'GetSceneList',
+              requestId,
+            },
+          }));
+        } catch (err: any) {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            scenes: [],
+            message: err?.message || 'Failed to request scene list',
+          });
+        }
+        return;
+      }
+
+      if (op === 7 && data?.requestId === requestId) {
+        const status = data?.requestStatus || {};
+        if (!status?.result) {
+          finish({
+            ok: false,
+            targetId: target.id,
+            targetName: target.name,
+            scenes: [],
+            message: String(status?.comment || `OBS request failed (code ${status?.code ?? 'unknown'})`),
+          });
+          return;
+        }
+
+        const responseData = data?.responseData || {};
+        const scenes = Array.isArray(responseData?.scenes)
+          ? responseData.scenes
+              .map((scene: any) => String(scene?.sceneName || '').trim())
+              .filter((name: string) => Boolean(name))
+          : [];
+        finish({
+          ok: true,
+          targetId: target.id,
+          targetName: target.name,
+          scenes,
+          currentProgramSceneName: typeof responseData?.currentProgramSceneName === 'string'
+            ? responseData.currentProgramSceneName
+            : undefined,
+          currentPreviewSceneName: typeof responseData?.currentPreviewSceneName === 'string'
+            ? responseData.currentPreviewSceneName
+            : undefined,
+          message: `Loaded ${scenes.length} scene${scenes.length === 1 ? '' : 's'} from OBS`,
+        });
+      }
+    });
+
+    ws.on('error', (err: Error) => {
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        scenes: [],
+        message: err?.message || 'OBS socket error',
+      });
+    });
+
+    ws.on('close', (code: number, reason: Buffer) => {
+      if (completed) return;
+      const detail = reason?.toString?.() || 'connection closed';
+      finish({
+        ok: false,
+        targetId: target.id,
+        targetName: target.name,
+        scenes: [],
+        message: `OBS closed connection (${code}): ${detail}`,
+      });
+    });
+  });
+}
+
+async function triggerObsGoLive(payload: OBSGoLivePayload): Promise<{ ok: boolean; results: OBSSceneTriggerResult[]; skipped?: string }> {
+  if (!payload?.enabled) {
+    return { ok: true, results: [], skipped: 'OBS automation disabled' };
+  }
+  if (payload?.triggerOnGoLive === false) {
+    return { ok: true, results: [], skipped: 'Go Live trigger disabled' };
+  }
+
+  const targets = Array.isArray(payload.targets)
+    ? payload.targets.map((target) => normalizeObsSceneTarget(target)).filter(Boolean) as OBSSceneTarget[]
+    : [];
+  const enabledTargets = targets.filter((target) => target.enabled);
+
+  if (enabledTargets.length === 0) {
+    return { ok: true, results: [], skipped: 'No enabled OBS targets configured' };
+  }
+
+  const results = await Promise.all(enabledTargets.map((target) => triggerObsSceneForTarget(target)));
+  return {
+    ok: results.every((result) => result.ok),
+    results,
+  };
+}
+
 let remoteControlConfig: RemoteControlConfig = {
   enabled: false,
   port: 4217,
   token: '',
 };
-let remoteControlApp: ReturnType<typeof express> | null = null;
 let remoteControlServer: import('http').Server | null = null;
 let remoteControlError: string | null = null;
 let remoteRuntimeState: RemoteRuntimeState = {
@@ -264,62 +749,81 @@ function buildRemoteControlPage(): string {
       .title { font-size: 18px; font-weight: 700; margin: 0 0 8px; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .state { display: grid; grid-template-columns: 130px 1fr; gap: 6px; font-size: 14px; }
+      .hidden { display: none !important; }
+      .session { margin-top: 6px; }
     </style>
   </head>
   <body>
     <div class="wrap">
-      <div class="card">
-        <p class="title">ScriptureFlow Remote</p>
-        <p class="muted">Control preview/live and queue from phone or laptop.</p>
-        <input id="token" placeholder="Access token (leave empty if remote has no token)" />
+      <div id="authGate" class="card hidden">
+        <p class="title">Remote Authorization</p>
+        <p class="muted">Enter access code to unlock remote controls for this device.</p>
+        <input id="token" type="password" placeholder="Access code" autocomplete="one-time-code" />
+        <div class="row">
+          <button id="authorizeBtn" class="primary">Authorize</button>
+        </div>
         <p id="authMsg" class="muted"></p>
       </div>
-      <div class="card">
-        <p class="title">Live Controls</p>
-        <div class="row">
-          <button class="ok" onclick="act('goLive')">Go Live</button>
-          <button class="danger" onclick="act('clearLive')">Clear Live</button>
-          <button onclick="act('nextVerse')">Next Verse</button>
-          <button onclick="act('prevVerse')">Previous Verse</button>
+
+      <div id="appRoot" class="hidden">
+        <div class="card">
+          <p class="title">ScriptureFlow Remote</p>
+          <p class="muted">Control preview/live and queue from phone or laptop.</p>
+          <p id="sessionInfo" class="muted session"></p>
+          <div id="changeCodeRow" class="row hidden">
+            <button type="button" onclick="clearAuthorization()">Change Access Code</button>
+          </div>
         </div>
-      </div>
-      <div class="card">
-        <p class="title">Mode</p>
-        <div class="row">
-          <button onclick="act('setModeManual')">Manual</button>
-          <button onclick="act('setModeAuto')">Auto</button>
-          <button onclick="act('toggleAutoPause')">Pause / Resume Auto</button>
+        <div class="card">
+          <p class="title">Live Controls</p>
+          <div class="row">
+            <button class="ok" onclick="act('goLive')">Go Live</button>
+            <button class="danger" onclick="act('clearLive')">Clear Live</button>
+            <button onclick="act('nextVerse')">Next Verse</button>
+            <button onclick="act('prevVerse')">Previous Verse</button>
+          </div>
         </div>
-      </div>
-      <div class="card">
-        <p class="title">Queue</p>
-        <div class="row">
-          <button class="primary" onclick="act('queuePreview')">Queue Current Preview</button>
-          <button class="ok" onclick="act('sendNextQueuedLive')">Send Next Queued Live</button>
+        <div class="card">
+          <p class="title">Mode</p>
+          <div class="row">
+            <button onclick="act('setModeManual')">Manual</button>
+            <button onclick="act('setModeAuto')">Auto</button>
+            <button onclick="act('toggleAutoPause')">Pause / Resume Auto</button>
+          </div>
         </div>
-      </div>
-      <div class="card">
-        <p class="title">Direct Preview Lookup</p>
-        <input id="book" placeholder="Book (e.g. John)" />
-        <input id="chapter" placeholder="Chapter (e.g. 3)" />
-        <input id="verse" placeholder="Verse (e.g. 16)" />
-        <button class="primary" onclick="setPreviewRef()">Set Preview Reference</button>
-      </div>
-      <div class="card">
-        <p class="title">Current State</p>
-        <div id="state" class="state"></div>
+        <div class="card">
+          <p class="title">Queue</p>
+          <div class="row">
+            <button class="primary" onclick="act('queuePreview')">Queue Current Preview</button>
+            <button class="ok" onclick="act('sendNextQueuedLive')">Send Next Queued Live</button>
+          </div>
+        </div>
+        <div class="card">
+          <p class="title">Direct Preview Lookup</p>
+          <input id="book" placeholder="Book (e.g. John)" />
+          <input id="chapter" placeholder="Chapter (e.g. 3)" />
+          <input id="verse" placeholder="Verse (e.g. 16)" />
+          <button class="primary" onclick="setPreviewRef()">Set Preview Reference</button>
+        </div>
+        <div class="card">
+          <p class="title">Current State</p>
+          <div id="state" class="state"></div>
+        </div>
       </div>
     </div>
     <script>
       let stateStream = null;
       let tokenRequired = false;
+      let isAuthorized = false;
 
-      function authHeaders() {
-        const token = document.getElementById('token').value.trim();
-        const headers = { 'Content-Type': 'application/json' };
-        if (token) headers['x-scriptureflow-token'] = token;
-        return headers;
-      }
+      const authGate = document.getElementById('authGate');
+      const appRoot = document.getElementById('appRoot');
+      const tokenInput = document.getElementById('token');
+      const authorizeBtn = document.getElementById('authorizeBtn');
+      const authMsgEl = document.getElementById('authMsg');
+      const sessionInfoEl = document.getElementById('sessionInfo');
+      const changeCodeRowEl = document.getElementById('changeCodeRow');
+
       function readTokenFromUrl() {
         try {
           const params = new URLSearchParams(window.location.search || '');
@@ -328,13 +832,60 @@ function buildRemoteControlPage(): string {
           return '';
         }
       }
+
+      function readTokenFromStorage() {
+        try {
+          return (window.localStorage.getItem('scriptureflow_remote_token') || '').trim();
+        } catch {
+          return '';
+        }
+      }
+
+      function saveTokenToStorage(token) {
+        try {
+          if (!token) {
+            window.localStorage.removeItem('scriptureflow_remote_token');
+            return;
+          }
+          window.localStorage.setItem('scriptureflow_remote_token', token);
+        } catch {}
+      }
+
+      function authHeaders() {
+        const token = getToken();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['x-scriptureflow-token'] = token;
+        return headers;
+      }
       function setAuthMsg(text) {
-        const el = document.getElementById('authMsg');
-        if (!el) return;
-        el.textContent = text || '';
+        authMsgEl.textContent = text || '';
+      }
+      function setSessionInfo(text) {
+        sessionInfoEl.textContent = text || '';
+      }
+      function showAuthGate(message) {
+        appRoot.classList.add('hidden');
+        authGate.classList.remove('hidden');
+        setAuthMsg(message || '');
+      }
+      function showAppRoot() {
+        authGate.classList.add('hidden');
+        appRoot.classList.remove('hidden');
+        if (tokenRequired) {
+          setSessionInfo('Access code accepted. Remote controls unlocked for this browser.');
+          changeCodeRowEl.classList.remove('hidden');
+        } else {
+          setSessionInfo('Remote control is open on your local network. No access code required.');
+          changeCodeRowEl.classList.add('hidden');
+        }
       }
       function getToken() {
-        return document.getElementById('token').value.trim();
+        return tokenInput.value.trim();
+      }
+      function closeStateStream() {
+        if (!stateStream) return;
+        try { stateStream.close(); } catch {}
+        stateStream = null;
       }
       async function loadPublicConfig() {
         try {
@@ -345,8 +896,8 @@ function buildRemoteControlPage(): string {
         } catch {}
       }
       async function act(type, payload) {
-        if (tokenRequired && !getToken()) {
-          setAuthMsg('Authentication required. Enter access token.');
+        if (tokenRequired && !isAuthorized) {
+          showAuthGate('Access code required. Enter code to continue.');
           return;
         }
         const res = await fetch('/api/action', {
@@ -355,7 +906,9 @@ function buildRemoteControlPage(): string {
           body: JSON.stringify({ type, payload: payload || {} }),
         });
         if (res.status === 401) {
-          setAuthMsg('Unauthorized: enter the correct access token.');
+          isAuthorized = false;
+          closeStateStream();
+          showAuthGate('Unauthorized. Enter the correct access code.');
           return;
         }
         await refreshState();
@@ -373,32 +926,29 @@ function buildRemoteControlPage(): string {
           '<div class=\"muted\">Auto Paused</div><div>' + (s.isAutoPaused ? 'Yes' : 'No') + '</div>' +
           '<div class=\"muted\">Frozen</div><div>' + (s.isLiveFrozen ? 'Yes' : 'No') + '</div>' +
           '<div class=\"muted\">Preview</div><div class=\"mono\">' + (s.previewReference || '-') + '</div>' +
-          '<div class=\"muted\">Live</div><div class=\"mono\">' + (s.liveReference || '-') + '</div>' +
-          '<div class=\"muted\">Queue</div><div>' + (s.queueCount ?? 0) + '</div>';
+           '<div class=\"muted\">Live</div><div class=\"mono\">' + (s.liveReference || '-') + '</div>' +
+           '<div class=\"muted\">Queue</div><div>' + (s.queueCount ?? 0) + '</div>';
       }
       async function refreshState() {
-        if (tokenRequired && !getToken()) {
-          setAuthMsg('Authentication required. Enter access token.');
+        if (tokenRequired && !isAuthorized) {
           return false;
         }
         const res = await fetch('/api/state', { headers: authHeaders() });
         if (res.status === 401) {
-          setAuthMsg('Unauthorized: enter the correct access token.');
+          isAuthorized = false;
+          closeStateStream();
+          showAuthGate('Unauthorized. Enter the correct access code.');
           return false;
         }
         if (!res.ok) return false;
-        setAuthMsg('');
         const data = await res.json();
         renderState(data.state || {});
         return true;
       }
       function connectStateStream() {
-        if (stateStream) {
-          try { stateStream.close(); } catch {}
-          stateStream = null;
-        }
+        closeStateStream();
         const token = getToken();
-        if (tokenRequired && !token) return;
+        if (tokenRequired && (!isAuthorized || !token)) return;
         const url = token ? ('/api/events?token=' + encodeURIComponent(token)) : '/api/events';
         try {
           const es = new EventSource(url);
@@ -412,32 +962,78 @@ function buildRemoteControlPage(): string {
           es.onerror = () => {
             try { es.close(); } catch {}
             stateStream = null;
-            if (tokenRequired && !getToken()) return;
+            if (tokenRequired && (!isAuthorized || !getToken())) return;
             setTimeout(connectStateStream, 1500);
           };
         } catch {}
       }
-      const tokenInput = document.getElementById('token');
-      tokenInput.value = readTokenFromUrl();
-      tokenInput.addEventListener('change', () => {
+
+      async function authorize() {
+        if (tokenRequired && !getToken()) {
+          showAuthGate('Enter access code to continue.');
+          return false;
+        }
+        const res = await fetch('/api/state', { headers: authHeaders() });
+        if (res.status === 401) {
+          isAuthorized = false;
+          closeStateStream();
+          showAuthGate('Unauthorized. Enter the correct access code.');
+          return false;
+        }
+        if (!res.ok) {
+          isAuthorized = false;
+          showAuthGate('Could not reach ScriptureFlow remote server.');
+          return false;
+        }
+        const data = await res.json();
+        isAuthorized = true;
+        if (tokenRequired) saveTokenToStorage(getToken());
+        renderState(data.state || {});
+        showAppRoot();
         connectStateStream();
-        refreshState();
+        return true;
+      }
+
+      function clearAuthorization() {
+        isAuthorized = false;
+        closeStateStream();
+        tokenInput.value = '';
+        saveTokenToStorage('');
+        showAuthGate('Enter access code to continue.');
+      }
+
+      window.clearAuthorization = clearAuthorization;
+
+      tokenInput.addEventListener('change', () => {
+        if (!tokenRequired) return;
+        authorize();
       });
       tokenInput.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter') return;
         ev.preventDefault();
-        connectStateStream();
-        refreshState();
+        authorize();
       });
+
+      authorizeBtn.addEventListener('click', () => {
+        authorize();
+      });
+
       loadPublicConfig().then(async () => {
-        if (tokenRequired && !getToken()) {
-          setAuthMsg('Authentication required. Enter access token.');
+        if (!tokenRequired) {
+          isAuthorized = true;
+          showAppRoot();
+          connectStateStream();
+          await refreshState();
           return;
         }
-        connectStateStream();
-        await refreshState();
+        tokenInput.value = readTokenFromUrl() || readTokenFromStorage();
+        showAuthGate(tokenInput.value ? 'Authorizing...' : 'Access code required.');
+        if (!tokenInput.value) return;
+        await authorize();
       });
-      setInterval(refreshState, 5000);
+      setInterval(() => {
+        if (!tokenRequired || isAuthorized) refreshState();
+      }, 5000);
     </script>
   </body>
 </html>`;
@@ -453,7 +1049,6 @@ async function stopRemoteControlServer(): Promise<void> {
     remoteControlServer?.close(() => resolve());
   });
   remoteControlServer = null;
-  remoteControlApp = null;
 }
 
 async function startRemoteControlServer(): Promise<void> {
@@ -542,7 +1137,7 @@ async function startRemoteControlServer(): Promise<void> {
     res.json({ ok: true });
   });
 
-  appServer.get('/', (req: Request, res: Response) => {
+  appServer.get('/', (_req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildRemoteControlPage());
   });
@@ -550,7 +1145,6 @@ async function startRemoteControlServer(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const server = appServer.listen(remoteControlConfig.port, '0.0.0.0', () => {
       remoteControlServer = server;
-      remoteControlApp = appServer;
       remoteControlError = null;
       console.log(`[Remote] Listening on port ${remoteControlConfig.port}`);
       resolve();
@@ -670,10 +1264,6 @@ function getGrandioseRootDir(): string {
     return path.join(process.cwd(), 'node_modules', 'grandiose');
   }
   return path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'grandiose');
-}
-
-function getGrandioseReleaseDir(): string {
-  return path.join(getGrandioseRootDir(), 'build', 'Release');
 }
 
 function getGrandioseDllTargets(): string[] {
@@ -1513,7 +2103,7 @@ app.on('window-all-closed', () => {
 
 // ── IPC: Live window ───────────────────────────────────────────────
 
-ipcMain.on('send-to-live', (event, { windowId = 'main', data }: { windowId?: string; data: any }) => {
+ipcMain.on('send-to-live', (_event, { windowId = 'main', data }: { windowId?: string; data: any }) => {
   let resolvedWindowId = windowId;
   if (windowId === NDI_LEGACY_WINDOW_ID) {
     resolvedWindowId = getNDIWindowId();
@@ -1535,7 +2125,7 @@ ipcMain.on('send-to-live', (event, { windowId = 'main', data }: { windowId?: str
   }
 });
 
-ipcMain.on('send-theme-to-live', (event, theme, layout) => {
+ipcMain.on('send-theme-to-live', (_event, theme, layout) => {
   liveWindows.forEach(win => win.webContents.send('update-theme', theme, layout));
 });
 
@@ -1565,15 +2155,15 @@ ipcMain.on('remote-control-state-sync', (_event, payload: Partial<RemoteRuntimeS
   broadcastRemoteState();
 });
 
-ipcMain.on('open-live-window', (event, { windowId = 'main', displayId }: { windowId?: string; displayId?: string }) => {
+ipcMain.on('open-live-window', (_event, { windowId = 'main', displayId }: { windowId?: string; displayId?: string }) => {
   createLiveWindow(windowId, displayId);
 });
 
-ipcMain.on('close-live-window', (event, windowId: string = 'main') => {
+ipcMain.on('close-live-window', (_event, windowId: string = 'main') => {
   liveWindows.get(windowId)?.close();
 });
 
-ipcMain.on('move-live-window', (event, { windowId = 'main', displayId }: { windowId?: string; displayId: string }) => {
+ipcMain.on('move-live-window', (_event, { windowId = 'main', displayId }: { windowId?: string; displayId: string }) => {
   const win = liveWindows.get(windowId);
   if (!win) {
     createLiveWindow(windowId, displayId);
@@ -1643,6 +2233,38 @@ ipcMain.on('open-external', (_event, url: string) => {
 // ipcMain.removeHandler() guards prevent "already registered" throws on any
 // accidental second call (e.g. hot-reload scenarios in dev).
 
+ipcMain.handle('obs-trigger-go-live', async (_event, payload: OBSGoLivePayload) => {
+  return triggerObsGoLive(payload);
+});
+
+ipcMain.handle('obs-test-target', async (_event, rawTarget: OBSSceneTarget) => {
+  const target = normalizeObsSceneTarget(rawTarget);
+  if (!target) {
+    return {
+      ok: false,
+      targetId: rawTarget?.id || randomUUID(),
+      targetName: rawTarget?.name || 'OBS Target',
+      mode: rawTarget?.mode === 'preview' ? 'preview' : 'program',
+      sceneName: rawTarget?.sceneName || '',
+      message: 'Host and scene name are required',
+    } as OBSSceneTriggerResult;
+  }
+  return triggerObsSceneForTarget({ ...target, enabled: true });
+});
+
+ipcMain.handle('obs-list-scenes', async (_event, rawTarget: OBSSceneTarget) => {
+  const target = normalizeObsSceneTarget(rawTarget, { requireScene: false });
+  if (!target) {
+    return {
+      ok: false,
+      targetId: rawTarget?.id || randomUUID(),
+      targetName: rawTarget?.name || 'OBS Target',
+      scenes: [],
+      message: 'Host and port are required before loading scenes',
+    } as OBSSceneListResult;
+  }
+  return listObsScenesForTarget({ ...target, enabled: true });
+});
 function registerRealtimeHandlers(): void {
   console.log('[Main] Registering Realtime IPC handlers…');
 

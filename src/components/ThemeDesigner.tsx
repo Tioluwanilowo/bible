@@ -1,7 +1,7 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import {
   X, Layers, AlignLeft, AlignCenter, AlignRight, AlignJustify, Eye, EyeOff,
-  Zap, Monitor, Plus, Copy, Trash2, Pencil, Maximize2, ArrowUp, ArrowDown, Square, Upload, Image as ImageIcon,
+  Zap, Monitor, Plus, Copy, Trash2, Pencil, ArrowUp, ArrowDown, Square, Upload, Image as ImageIcon,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
@@ -685,7 +685,6 @@ function ElementPanel({ el, kind, theme, onUpdate }: {
   onUpdate: (updates: Partial<ElementPosition>) => void;
 }) {
   const ps = theme.settings;
-  const accent = kind === 'scripture' ? 'text-indigo-400' : 'text-amber-400';
   const globalFontSize = kind === 'scripture' ? Math.round(64 * (ps.fontScale ?? 1)) : Math.round(32 * (ps.fontScale ?? 1));
   const defaultZ = kind === 'scripture'
     ? (DEFAULT_ELEMENTS.scripture.zIndex ?? 20)

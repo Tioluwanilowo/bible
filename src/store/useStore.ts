@@ -2,8 +2,6 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
   AppState,
-  ListeningState,
-  TranscriptionStatus,
   Theme,
   OutputTarget,
   DEFAULT_ELEMENTS,
@@ -19,6 +17,7 @@ import { interpretTranscript } from '../lib/commandInterpreter';
 import { executeCommand } from '../lib/commandExecutor';
 import { referenceStateEngine } from '../lib/interpreter/ReferenceStateEngine';
 import type { AIResponse } from '../lib/interpreter/types';
+import { isMissingObsHandlerError, triggerObsGoLiveDirect } from '../lib/obs/obsDirectClient';
 
 // ── Fast-path scripture extraction ───────────────────────────────────────────
 // After the scriptureNormalizer converts "John ten ten" → "John 10:10", the
@@ -322,6 +321,11 @@ const DEFAULT_SETTINGS: Settings = {
     port: 4217,
     token: '',
   },
+  obsAutomation: {
+    enabled: false,
+    triggerOnGoLive: true,
+    targets: [],
+  },
   presentation: {
     theme: 'dark',
     layout: 'full-scripture',
@@ -358,6 +362,13 @@ function cloneSettings(settings: Settings): Settings {
   return {
     ...settings,
     remoteControl: { ...settings.remoteControl },
+    obsAutomation: {
+      enabled: settings.obsAutomation?.enabled ?? false,
+      triggerOnGoLive: settings.obsAutomation?.triggerOnGoLive ?? true,
+      targets: Array.isArray(settings.obsAutomation?.targets)
+        ? settings.obsAutomation.targets.map((target) => ({ ...target }))
+        : [],
+    },
     presentation: { ...settings.presentation },
     hotkeys: Object.fromEntries(
       Object.entries(settings.hotkeys || {}).map(([k, v]) => [k, { ...v, modifiers: [...(v.modifiers || [])] }]),
@@ -382,10 +393,12 @@ function buildUserProfileSnapshot(
   },
   name: string,
   id?: string,
+  avatarDataUrl?: string,
 ): AppUserProfile {
   return {
     id: id || crypto.randomUUID(),
     name,
+    avatarDataUrl,
     settings: cloneSettings(state.settings),
     version: state.version,
     mode: state.mode,
@@ -618,6 +631,15 @@ export const useStore = create<AppState>()(
           ),
         }));
       },
+      setUserProfileAvatar: (id, avatarDataUrl) => {
+        set((state) => ({
+          userProfiles: state.userProfiles.map((profile) =>
+            profile.id === id
+              ? { ...profile, avatarDataUrl: avatarDataUrl || undefined, updatedAt: Date.now() }
+              : profile,
+          ),
+        }));
+      },
       deleteUserProfile: (id) => {
         const state = get();
         if (state.userProfiles.length <= 1) return;
@@ -668,7 +690,7 @@ export const useStore = create<AppState>()(
           activeThemeId: state.activeThemeId,
           activeVoiceProfileId: state.activeVoiceProfileId,
           outputTargets: state.outputTargets,
-        }, currentProfile?.name || 'Profile', activeId);
+        }, currentProfile?.name || 'Profile', activeId, currentProfile?.avatarDataUrl);
         set((s) => ({
           userProfiles: s.userProfiles.map((profile) => profile.id === activeId ? snapshot : profile),
         }));
@@ -912,6 +934,57 @@ export const useStore = create<AppState>()(
           if (primaryTarget) {
             import('../lib/output/OutputProviderManager').then(({ outputManager }) => {
               outputManager.updateAll(buildPayload(primaryTarget));
+            });
+          }
+
+          // 4. Optional OBS scene automation: switch configured OBS targets when
+          //    scripture goes live so operators can cut to scripture scenes instantly.
+          const obsAutomation = settings.obsAutomation;
+          const hasEnabledObsTargets = Array.isArray(obsAutomation?.targets)
+            && obsAutomation.targets.some((target) => target?.enabled && target?.host && target?.sceneName);
+          if (
+            typeof window !== 'undefined'
+            && obsAutomation?.enabled
+            && obsAutomation.triggerOnGoLive !== false
+            && hasEnabledObsTargets
+          ) {
+            const runObsTrigger = async () => {
+              if (window.electronAPI?.obsTriggerGoLive) {
+                try {
+                  return await window.electronAPI.obsTriggerGoLive({
+                    enabled: obsAutomation.enabled,
+                    triggerOnGoLive: obsAutomation.triggerOnGoLive,
+                    targets: obsAutomation.targets,
+                    reference: content.reference,
+                  });
+                } catch (err: any) {
+                  // Mixed-version dev/prod sessions can miss IPC handlers; fall back to direct WS.
+                  if (!isMissingObsHandlerError(err)) throw err;
+                }
+              }
+              return triggerObsGoLiveDirect({
+                enabled: obsAutomation.enabled,
+                triggerOnGoLive: obsAutomation.triggerOnGoLive,
+                targets: obsAutomation.targets,
+              });
+            };
+
+            runObsTrigger().then((result: any) => {
+              const rows = Array.isArray(result?.results) ? result.results : [];
+              if (rows.length === 0) return;
+              const successCount = rows.filter((row: any) => row?.ok).length;
+              const failed = rows.filter((row: any) => !row?.ok);
+              if (failed.length === 0) {
+                get().logActivity(`OBS scene switched on ${successCount} target${successCount === 1 ? '' : 's'}.`, 'success');
+                return;
+              }
+              get().logActivity(
+                `OBS scene switch: ${successCount}/${rows.length} succeeded.`,
+                'warning',
+                failed.slice(0, 3).map((row: any) => `${row?.targetName || row?.targetId}: ${row?.message || 'Unknown error'}`),
+              );
+            }).catch((err: any) => {
+              get().logActivity(`OBS trigger failed: ${err?.message || 'Unknown error'}`, 'error');
             });
           }
         } else {
@@ -1296,7 +1369,7 @@ export const useStore = create<AppState>()(
         }
       },
       
-      executeCommand: (command) => {
+      executeCommand: (_command) => {
         // Legacy method kept for compatibility, now handled in processCommand directly
       },
       
@@ -1675,6 +1748,14 @@ export const useStore = create<AppState>()(
             ...(currentState.settings?.remoteControl || {}),
             ...(persistedState.settings?.remoteControl || {}),
           },
+          obsAutomation: {
+            ...(currentState.settings?.obsAutomation || {}),
+            ...(persistedState.settings?.obsAutomation || {}),
+            triggerOnGoLive: persistedState.settings?.obsAutomation?.triggerOnGoLive ?? currentState.settings?.obsAutomation?.triggerOnGoLive ?? true,
+            targets: Array.isArray(persistedState.settings?.obsAutomation?.targets)
+              ? persistedState.settings.obsAutomation.targets
+              : (currentState.settings?.obsAutomation?.targets || []),
+          },
         };
 
         const mergedOutputTargets: OutputTarget[] = persistedState.outputTargets?.length
@@ -1696,7 +1777,7 @@ export const useStore = create<AppState>()(
           activeThemeId: persistedState.activeThemeId || null,
           activeVoiceProfileId: persistedState.activeVoiceProfileId || currentState.activeVoiceProfileId,
           outputTargets: mergedOutputTargets,
-        }, 'Default Profile', DEFAULT_USER_PROFILE_ID);
+        }, 'Default Profile', DEFAULT_USER_PROFILE_ID, undefined);
 
         const persistedProfiles = Array.isArray(persistedState.userProfiles)
           ? persistedState.userProfiles.map((profile: any, index: number) => {
@@ -1720,6 +1801,14 @@ export const useStore = create<AppState>()(
                       ...(mergedSettings.remoteControl || {}),
                       ...(profile.settings?.remoteControl || {}),
                     },
+                    obsAutomation: {
+                      ...(mergedSettings.obsAutomation || {}),
+                      ...(profile.settings?.obsAutomation || {}),
+                      triggerOnGoLive: profile.settings?.obsAutomation?.triggerOnGoLive ?? mergedSettings.obsAutomation?.triggerOnGoLive ?? true,
+                      targets: Array.isArray(profile.settings?.obsAutomation?.targets)
+                        ? profile.settings.obsAutomation.targets
+                        : (mergedSettings.obsAutomation?.targets || []),
+                    },
                   }
                 : mergedSettings;
 
@@ -1740,7 +1829,7 @@ export const useStore = create<AppState>()(
                 outputTargets: Array.isArray(profile?.outputTargets) && profile.outputTargets.length > 0
                   ? profile.outputTargets.map((t: any) => ({ ...t, windowOpen: false }))
                   : mergedOutputTargets,
-              }, name, profile?.id);
+              }, name, profile?.id, typeof profile?.avatarDataUrl === 'string' ? profile.avatarDataUrl : undefined);
             })
           : [];
 

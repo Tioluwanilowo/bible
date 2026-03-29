@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { ListOrdered, Eye, Send, Trash2, Plus, Timer } from 'lucide-react';
 import { useStore } from '../store/useStore';
 
@@ -37,14 +37,14 @@ export default function RunSheetPanel() {
   }, [runSheetAuto.enabled, runSheetAuto.intervalSec]);
 
   return (
-    <div className="w-full max-w-3xl mb-4 bg-zinc-900/70 border border-zinc-800 rounded-xl p-3">
-      <div className="flex items-center justify-between gap-3 mb-3">
+    <div className="w-full mb-4 bg-zinc-900/70 border border-zinc-800 rounded-xl p-3">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
         <div className="flex items-center gap-2 text-zinc-300">
           <ListOrdered className="w-4 h-4 text-indigo-400" />
           <span className="text-xs uppercase tracking-wider font-semibold">Run Sheet</span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">{queue.length}</span>
         </div>
-        <div className="flex items-center gap-2 flex-wrap justify-end">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-zinc-700 bg-zinc-950">
             <Timer className="w-3.5 h-3.5 text-indigo-400" />
             <label className="text-[10px] text-zinc-500">Auto Cue</label>
