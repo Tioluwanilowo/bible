@@ -32,10 +32,27 @@ module.exports = async function afterPack(context) {
     'node_modules',
     'grandiose',
   );
+
   const targets = [
     path.join(root, 'build', 'Release', 'Processing.NDI.Lib.x64.dll'),
     path.join(root, 'lib', 'win_x64', 'Processing.NDI.Lib.x64.dll'),
   ];
+
+  // grandiose may resolve the addon from bin/win32-x64-*, so keep the runtime
+  // DLL beside those native addon directories as well.
+  const binRoot = path.join(root, 'bin');
+  try {
+    if (fs.existsSync(binRoot)) {
+      for (const entry of fs.readdirSync(binRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        if (!entry.name.toLowerCase().startsWith('win32-x64')) continue;
+        targets.push(path.join(binRoot, entry.name, 'Processing.NDI.Lib.x64.dll'));
+      }
+    }
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.warn(`[afterPack][NDI] Could not scan bin directories: ${msg}`);
+  }
 
   const runtimeDll = findRuntimeDll();
   if (!runtimeDll) {
@@ -44,7 +61,7 @@ module.exports = async function afterPack(context) {
   }
 
   let copied = 0;
-  for (const target of targets) {
+  for (const target of [...new Set(targets)]) {
     try {
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.copyFileSync(runtimeDll, target);
